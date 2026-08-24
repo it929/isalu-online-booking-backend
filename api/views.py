@@ -2,7 +2,7 @@ from rest_framework import viewsets, status, filters
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAuthenticatedOrReadOnly
 from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 import random
@@ -110,29 +110,35 @@ class StaffLoginView(APIView):
 class DepartmentViewSet(viewsets.ModelViewSet):
     queryset = Department.objects.all()
     serializer_class = DepartmentSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'dept_id'
 
 
 class DoctorViewSet(viewsets.ModelViewSet):
     queryset = Doctor.objects.all()
     serializer_class = DoctorSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'doc_id'
 
 
 class SpecialistScheduleViewSet(viewsets.ModelViewSet):
     queryset = SpecialistSchedule.objects.all()
     serializer_class = SpecialistScheduleSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'sched_id'
 
 
 class BookingViewSet(viewsets.ModelViewSet):
     queryset = Booking.objects.all()
     serializer_class = BookingSerializer
-    permission_classes = [AllowAny]
     lookup_field = 'ref_code'
+
+    def get_permissions(self):
+        # Anyone can create a new appointment booking or view a specific ticket by reference code
+        if self.action in ['create', 'retrieve']:
+            return [AllowAny()]
+        # Listing ALL patient bookings, updating, deleting, and administrative actions strictly require authentication
+        return [IsAuthenticated()]
 
     def partial_update(self, request, *args, **kwargs):
         booking = self.get_object()
@@ -227,7 +233,7 @@ class BookingViewSet(viewsets.ModelViewSet):
 class HmoCompanyViewSet(viewsets.ModelViewSet):
     queryset = HmoCompany.objects.all()
     serializer_class = HmoCompanySerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'hmo_id'
 
     def create(self, request, *args, **kwargs):
@@ -253,12 +259,12 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
 class SystemUserViewSet(viewsets.ModelViewSet):
     queryset = SystemUser.objects.all()
     serializer_class = SystemUserSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     lookup_field = 'user_id'
 
 
 class CustomTimeSlotViewSet(viewsets.ModelViewSet):
     queryset = CustomTimeSlot.objects.all()
     serializer_class = CustomTimeSlotSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'slot_id'
