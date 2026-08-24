@@ -230,6 +230,25 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     lookup_field = 'hmo_id'
 
+    def create(self, request, *args, **kwargs):
+        hmo_id = request.data.get('hmo_id') or request.data.get('id')
+        name = request.data.get('name')
+        if hmo_id:
+            existing = HmoCompany.objects.filter(hmo_id=hmo_id).first()
+            if existing:
+                serializer = self.get_serializer(existing, data=request.data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+        if name:
+            existing = HmoCompany.objects.filter(name__iexact=str(name).strip()).first()
+            if existing:
+                serializer = self.get_serializer(existing, data=request.data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+        return super().create(request, *args, **kwargs)
+
 
 class SystemUserViewSet(viewsets.ModelViewSet):
     queryset = SystemUser.objects.all()

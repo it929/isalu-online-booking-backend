@@ -181,21 +181,44 @@ class BookingSerializer(serializers.ModelSerializer):
 
 
 class HmoCompanySerializer(serializers.ModelSerializer):
-    id = serializers.CharField(source='hmo_id', required=False)
     hmo_id = serializers.CharField(required=False)
-    contactPerson = serializers.CharField(source='contact_person', required=False)
+    name = serializers.CharField(required=False)
 
     class Meta:
         model = HmoCompany
-        fields = [
-            'id', 'hmo_id', 'name', 'code', 'email', 'phone', 'contact_person', 'contactPerson', 'status'
-        ]
+        fields = '__all__'
 
-    def create(self, validated_data):
+    def to_internal_value(self, data):
         import time
-        hmo_id = validated_data.get('hmo_id') or validated_data.get('id') or f"hmo-{int(time.time() * 1000)}"
-        validated_data['hmo_id'] = hmo_id
-        return super().create(validated_data)
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+
+        if self.instance:
+            hmo_id_val = getattr(self.instance, 'hmo_id', None) or data_copy.get('hmo_id') or data_copy.get('id')
+        else:
+            hmo_id_val = data_copy.get('hmo_id') or data_copy.get('id') or f"hmo-{int(time.time() * 1000)}"
+
+        if hmo_id_val:
+            data_copy['hmo_id'] = hmo_id_val
+
+        contact = data_copy.get('contact_person') or data_copy.get('contactPerson') or 'Pre-Auth Desk Officer'
+        data_copy['contact_person'] = contact
+
+        mapping = {
+            'contactPerson': 'contact_person',
+        }
+        for camel, snake in mapping.items():
+            if camel in data_copy:
+                if snake not in data_copy or not data_copy[snake]:
+                    data_copy[snake] = data_copy[camel]
+                data_copy.pop(camel, None)
+
+        return super().to_internal_value(data_copy)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['id'] = instance.hmo_id
+        ret['contactPerson'] = instance.contact_person
+        return ret
 
 
 class SystemUserSerializer(serializers.ModelSerializer):
