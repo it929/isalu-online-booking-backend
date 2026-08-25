@@ -18,6 +18,10 @@ from .serializers import (
     CustomTimeSlotSerializer
 )
 
+from django.contrib.auth.hashers import check_password, make_password
+from django.contrib.auth.models import User
+
+
 class StaffLoginView(APIView):
     permission_classes = [AllowAny]
 
@@ -28,14 +32,13 @@ class StaffLoginView(APIView):
 
         if not username_input or not password_input:
             return Response(
-                {"error": "Please enter both Username/Email and Password."},
+                {"error": "Please enter both Email/Username and Password."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 1. Try Django Superuser / User Auth
+        # 1. Try standard Django User authentication (by username or email)
         user = authenticate(username=username_input, password=password_input)
         if not user:
-            from django.contrib.auth.models import User
             user_obj = User.objects.filter(email__iexact=username_input).first()
             if user_obj:
                 user = authenticate(username=user_obj.username, password=password_input)
@@ -58,12 +61,8 @@ class StaffLoginView(APIView):
                 }
             }, status=status.HTTP_200_OK)
 
-        # 2. Check SystemUser records with Strict Password Check
-        disabled_sys_user = (
-            SystemUser.objects.filter(email__iexact=username_input, status="Disabled").first()
-            or SystemUser.objects.filter(name__icontains=username_input, status="Disabled").first()
-        )
-
+        # 2. Check SystemUser records strictly by exact email or name
+        disabled_sys_user = SystemUser.objects.filter(email__iexact=username_input, status="Disabled").first()
         if disabled_sys_user:
             return Response(
                 {"error": f"Account Access Disabled: Staff account for '{disabled_sys_user.name}' has been disabled by the Administrator."},
@@ -72,30 +71,36 @@ class StaffLoginView(APIView):
 
         sys_user = (
             SystemUser.objects.filter(email__iexact=username_input, status="Active").first()
-            or SystemUser.objects.filter(name__icontains=username_input, status="Active").first()
-            or SystemUser.objects.filter(role__icontains=username_input, status="Active").first()
-            or SystemUser.objects.filter(desk__icontains=username_input, status="Active").first()
+            or SystemUser.objects.filter(name__iexact=username_input, status="Active").first()
         )
-        if not sys_user and username_input.lower() in ["staff", "admin", "hospital", "duty", "desk", "user"]:
-            sys_user = SystemUser.objects.filter(status="Active").first()
 
         if sys_user:
-            expected_password = sys_user.password if sys_user.password else "admin123"
-            if password_input == expected_password or password_input in ["admin123", "admin"]:
-                from django.contrib.auth.models import User
-                django_user = User.objects.filter(email__iexact=sys_user.email).first()
+            is_valid_password = False
+
+            if check_password(password_input, sys_user.password):
+                is_valid_password = True
+            elif password_input == sys_user.password:
+                # If legacy plaintext password matched, auto-hash and save
+                sys_user.password = make_password(password_input)
+                sys_user.save()
+                is_valid_password = True
+
+            if is_valid_password:
+                clean_username = sys_user.email.lower() if sys_user.email else f"user_{sys_user.user_id}".lower()
+                django_user = User.objects.filter(email__iexact=sys_user.email).first() or User.objects.filter(username__iexact=clean_username).first()
+
                 if not django_user:
-                    django_user = User.objects.filter(username__iexact=sys_user.email).first()
-                if not django_user:
-                    clean_username = sys_user.email if sys_user.email else f"user_{sys_user.user_id}".lower()
-                    django_user, _ = User.objects.get_or_create(
+                    django_user = User.objects.create_user(
                         username=clean_username,
-                        defaults={
-                            'email': sys_user.email,
-                            'first_name': sys_user.name,
-                            'is_staff': True
-                        }
+                        email=sys_user.email,
+                        password=password_input,
+                        first_name=sys_user.name,
+                        is_staff=True
                     )
+                else:
+                    django_user.set_password(password_input)
+                    django_user.save()
+
                 refresh = RefreshToken.for_user(django_user)
                 return Response({
                     "message": "System user authenticated successfully",
@@ -111,14 +116,9 @@ class StaffLoginView(APIView):
                         "refresh": str(refresh),
                     }
                 }, status=status.HTTP_200_OK)
-            else:
-                return Response(
-                    {"error": "Invalid password. Please check your credentials and try again."},
-                    status=status.HTTP_401_UNAUTHORIZED
-                )
 
         return Response(
-            {"error": "Invalid credentials. Please check your password and try again."},
+            {"error": "Invalid email or password. Please check your credentials and try again."},
             status=status.HTTP_401_UNAUTHORIZED
         )
 

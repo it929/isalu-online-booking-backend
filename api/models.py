@@ -107,6 +107,9 @@ class HmoCompany(models.Model):
         return f"{self.name} ({self.code})"
 
 
+from django.contrib.auth.hashers import make_password
+
+
 class SystemUser(models.Model):
     user_id = models.CharField(max_length=100, primary_key=True)
     name = models.CharField(max_length=200)
@@ -119,6 +122,15 @@ class SystemUser(models.Model):
 
     class Meta:
         ordering = ['name']
+
+    def save(self, *args, **kwargs):
+        if self.password and not (
+            self.password.startswith('pbkdf2_') or
+            self.password.startswith('argon2') or
+            self.password.startswith('bcrypt')
+        ):
+            self.password = make_password(self.password)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} - {self.role}"

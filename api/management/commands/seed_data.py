@@ -59,13 +59,17 @@ class Command(BaseCommand):
             HmoCompany.objects.get_or_create(hmo_id=hmo['hmo_id'], defaults=hmo)
 
         # 5. System Users
+        from django.contrib.auth.hashers import make_password
         users = [
-            {'user_id': 'usr-1', 'name': 'Dr. Chief Administrator', 'email': 'admin@isaluhospitals.com', 'role': 'Super Administrator', 'desk': 'All Access', 'status': 'Active', 'last_active': 'Just now'},
-            {'user_id': 'usr-2', 'name': 'Mrs. Adesuwa Receptionist', 'email': 'reception@isaluhospitals.com', 'role': 'Helpdesk Officer', 'desk': 'Helpdesk Reception', 'status': 'Active', 'last_active': '5 mins ago'},
-            {'user_id': 'usr-3', 'name': 'Mr. Kunle HMO Officer', 'email': 'hmo.desk@isaluhospitals.com', 'role': 'HMO Approval Officer', 'desk': 'HMO Approval Desk', 'status': 'Active', 'last_active': '12 mins ago'},
-            {'user_id': 'usr-4', 'name': 'Mrs. Blessing Cashier', 'email': 'cashdesk@isaluhospitals.com', 'role': 'Cashier / Billing Officer', 'desk': 'Cashdesk & Invoicing', 'status': 'Active', 'last_active': '20 mins ago'},
+            {'user_id': 'usr-1', 'name': 'Dr. Chief Administrator', 'email': 'admin@isaluhospitals.com', 'password': make_password('admin123'), 'role': 'Super Administrator', 'desk': 'All Access', 'status': 'Active', 'last_active': 'Just now'},
+            {'user_id': 'usr-2', 'name': 'Mrs. Adesuwa Receptionist', 'email': 'reception@isaluhospitals.com', 'password': make_password('admin123'), 'role': 'Helpdesk Officer', 'desk': 'Helpdesk Reception', 'status': 'Active', 'last_active': '5 mins ago'},
+            {'user_id': 'usr-3', 'name': 'Mr. Kunle HMO Officer', 'email': 'hmo.desk@isaluhospitals.com', 'password': make_password('admin123'), 'role': 'HMO Approval Officer', 'desk': 'HMO Approval Desk', 'status': 'Active', 'last_active': '12 mins ago'},
+            {'user_id': 'usr-4', 'name': 'Mrs. Blessing Cashier', 'email': 'cashdesk@isaluhospitals.com', 'password': make_password('admin123'), 'role': 'Cashier / Billing Officer', 'desk': 'Cashdesk & Invoicing', 'status': 'Active', 'last_active': '20 mins ago'},
         ]
         for u in users:
-            SystemUser.objects.get_or_create(user_id=u['user_id'], defaults=u)
+            SystemUser.objects.update_or_create(
+                user_id=u['user_id'],
+                defaults=u
+            )
 
         self.stdout.write(self.style.SUCCESS('Successfully seeded initial Django database!'))
