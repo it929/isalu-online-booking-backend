@@ -100,12 +100,8 @@ class DoctorViewSet(viewsets.ModelViewSet):
         queryset = Doctor.objects.all().select_related('department')
         dept_param = self.request.query_params.get('department') or self.request.query_params.get('department_id') or self.request.query_params.get('dept_id')
         if dept_param and dept_param != 'all':
-            from django.db.models import Q
             dept_clean = dept_param.strip().lower()
-            queryset = queryset.filter(
-                Q(department__dept_id__iexact=dept_clean) |
-                Q(department__name__iexact=dept_clean)
-            )
+            queryset = queryset.filter(department__dept_id__iexact=dept_clean)
         return queryset
 
 
