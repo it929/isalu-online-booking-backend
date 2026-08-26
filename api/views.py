@@ -144,16 +144,29 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
 
 
 class BookingViewSet(viewsets.ModelViewSet):
-    queryset = Booking.objects.all()
     serializer_class = BookingSerializer
     lookup_field = 'ref_code'
 
+    def get_queryset(self):
+        include_disabled = self.request.query_params.get('include_disabled') == 'true'
+        if include_disabled:
+            return Booking.objects.all()
+        return Booking.objects.filter(is_active=True).exclude(status="Disabled")
+
     def get_permissions(self):
-        # Anyone can create a new appointment booking or view a specific ticket by reference code
-        if self.action in ['create', 'retrieve']:
-            return [AllowAny()]
-        # Listing ALL patient bookings, updating, deleting, and administrative actions strictly require authentication
-        return [IsAuthenticated()]
+        return [AllowAny()]
+
+    def destroy(self, request, *args, **kwargs):
+        booking = self.get_object()
+        reason = request.data.get('reason') or request.data.get('delete_reason') or request.data.get('deleteReason') or "Disabled by Administrator"
+        booking.is_active = False
+        booking.status = "Disabled"
+        booking.delete_reason = reason
+        booking.save()
+        return Response(
+            {"message": f"Booking {booking.ref_code} disabled successfully.", "data": BookingSerializer(booking).data},
+            status=status.HTTP_200_OK
+        )
 
     def partial_update(self, request, *args, **kwargs):
         booking = self.get_object()
@@ -188,6 +201,46 @@ class BookingViewSet(viewsets.ModelViewSet):
             "pendingHmoCount": pending_hmo,
             "pendingCashCount": pending_cash,
         })
+
+    @action(detail=False, methods=['get'], url_path='disabled')
+    def disabled_bookings(self, request):
+        from django.db.models import Q
+        queryset = Booking.objects.filter(Q(is_active=False) | Q(status="Disabled"))
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='restore')
+    def restore_booking(self, request, ref_code=None):
+        booking = Booking.objects.filter(ref_code=ref_code).first()
+        if not booking:
+            return Response({"error": "Booking record not found."}, status=status.HTTP_404_NOT_FOUND)
+        booking.is_active = True
+        booking.status = "Booked"
+        booking.delete_reason = ""
+        booking.save()
+        return Response({"message": f"Booking {booking.ref_code} restored successfully.", "data": BookingSerializer(booking).data})
+
+    @action(detail=True, methods=['post', 'patch'], url_path='reroute-cashdesk')
+    def reroute_cashdesk(self, request, ref_code=None):
+        booking = Booking.objects.filter(ref_code=ref_code).first()
+        if not booking:
+            booking = self.get_object()
+        if not booking:
+            return Response({"error": f"Booking ticket {ref_code} not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        remark = request.data.get('remark') or request.data.get('delete_reason') or request.data.get('hmoRemark') or request.data.get('hmo_status') or "Passed from HMO to Cashdesk"
+
+        booking.payment_type = "Private Self-Pay"
+        booking.hmo_name = "N/A"
+        booking.hmo_status = f"Re-routed to Cashdesk (Self-Pay): {remark}"
+        booking.payment_status = "Pending"
+        booking.delete_reason = f"Re-routed from HMO to Cashdesk: {remark}"
+        booking.save()
+
+        return Response({
+            "message": f"Ticket {booking.ref_code} re-routed to Cashdesk as Private Self-Pay.",
+            "data": BookingSerializer(booking).data
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='check-in')
     def check_in(self, request, ref_code=None):

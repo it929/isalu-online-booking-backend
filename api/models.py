@@ -77,11 +77,13 @@ class Booking(models.Model):
     hmo_policy_code = models.CharField(max_length=100, blank=True, default='')
     hmo_auth_code = models.CharField(max_length=100, blank=True, default='')
     referral_doc_name = models.CharField(max_length=200, blank=True, default='')
-    hmo_status = models.CharField(max_length=100, default='N/A')
+    hmo_status = models.TextField(blank=True, default='N/A')
     payment_status = models.CharField(max_length=100, default='Pending')
     payment_method = models.CharField(max_length=100, blank=True, default='POS / Cash')
     invoice_ref = models.CharField(max_length=100, blank=True, default='')
     status = models.CharField(max_length=100, default='Confirmed')
+    is_active = models.BooleanField(default=True)
+    delete_reason = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:

@@ -127,10 +127,12 @@ class BookingSerializer(serializers.ModelSerializer):
     hmoPolicyCode = serializers.CharField(source='hmo_policy_code', required=False, allow_blank=True)
     hmoAuthCode = serializers.CharField(source='hmo_auth_code', required=False, allow_blank=True)
     referralDocName = serializers.CharField(source='referral_doc_name', required=False, allow_blank=True)
-    hmoStatus = serializers.CharField(source='hmo_status', required=False)
-    paymentStatus = serializers.CharField(source='payment_status', required=False)
+    hmoStatus = serializers.CharField(source='hmo_status', required=False, allow_blank=True)
+    paymentStatus = serializers.CharField(source='payment_status', required=False, allow_blank=True)
     paymentMethod = serializers.CharField(source='payment_method', required=False, allow_blank=True)
     invoiceRef = serializers.CharField(source='invoice_ref', required=False, allow_blank=True)
+    isActive = serializers.BooleanField(source='is_active', required=False, default=True)
+    deleteReason = serializers.CharField(source='delete_reason', required=False, allow_blank=True)
     createdAt = serializers.DateTimeField(source='created_at', read_only=True)
 
     class Meta:
@@ -142,7 +144,8 @@ class BookingSerializer(serializers.ModelSerializer):
             'payment_type', 'paymentType', 'hmo_name', 'hmoName', 'hmo_policy_code', 'hmoPolicyCode',
             'hmo_auth_code', 'hmoAuthCode', 'referral_doc_name', 'referralDocName', 'hmo_status',
             'hmoStatus', 'payment_status', 'paymentStatus', 'payment_method', 'paymentMethod',
-            'invoice_ref', 'invoiceRef', 'status', 'created_at', 'createdAt'
+            'invoice_ref', 'invoiceRef', 'status', 'is_active', 'isActive', 'delete_reason', 'deleteReason',
+            'created_at', 'createdAt'
         ]
 
     def to_internal_value(self, data):
@@ -164,6 +167,8 @@ class BookingSerializer(serializers.ModelSerializer):
             'paymentStatus': 'payment_status',
             'paymentMethod': 'payment_method',
             'invoiceRef': 'invoice_ref',
+            'isActive': 'is_active',
+            'deleteReason': 'delete_reason',
         }
         for camel, snake in mapping.items():
             if camel in data_copy:
