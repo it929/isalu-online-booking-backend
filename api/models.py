@@ -8,7 +8,7 @@ class Department(models.Model):
     icon_name = models.CharField(max_length=100, default='Stethoscope')
     doctor_count = models.IntegerField(default=0)
     location = models.CharField(max_length=200, blank=True, default='Main Building')
-    status = models.CharField(max_length=50, default='Active')
+    status = models.BooleanField(default=True)
 
     class Meta:
         ordering = ['name']
@@ -32,7 +32,7 @@ class Doctor(models.Model):
     bio = models.TextField(blank=True, default='Senior Medical Consultant specializing in high-quality clinical care at Isalu Hospitals.')
     room_number = models.CharField(max_length=100, default='Consultation Suite 4B')
     accepted_patient_types = models.JSONField(default=list, blank=True, help_text="Accepted patient categories e.g. ['Private Self-Pay', 'HMO Insurance']")
-    status = models.CharField(max_length=50, default='Active')
+    status = models.BooleanField(default=True)
 
     class Meta:
         ordering = ['doc_id']
@@ -52,7 +52,7 @@ class SpecialistSchedule(models.Model):
     shift_time = models.TextField(blank=True, default='08:00 AM – 02:00 PM')
     capacity = models.IntegerField(default=15)
     total_weekly_capacity = models.IntegerField(default=15)
-    status = models.CharField(max_length=100, default='Active On Duty')
+    status = models.BooleanField(default=True)
 
     class Meta:
         ordering = ['sched_id']
@@ -100,7 +100,7 @@ class HmoCompany(models.Model):
     email = models.EmailField()
     phone = models.CharField(max_length=50)
     contact_person = models.CharField(max_length=200)
-    status = models.CharField(max_length=100, default='Active Partner')
+    status = models.BooleanField(default=True)
 
     class Meta:
         ordering = ['name']
@@ -120,7 +120,7 @@ class Role(models.Model):
     primary_desk = models.CharField(max_length=100, default='helpdesk')
     allowed_desks = models.JSONField(default=list, blank=True)
     is_system_role = models.BooleanField(default=False)
-    status = models.CharField(max_length=50, default='Active')
+    status = models.BooleanField(default=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:

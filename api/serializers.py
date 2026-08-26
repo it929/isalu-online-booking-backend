@@ -3,6 +3,19 @@ from django.contrib.auth.models import User
 import time
 from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, CustomTimeSlot, Role, UserProfile
 
+def parse_bool_status(val, default=True):
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    s = str(val).strip().lower()
+    if s in ('true', '1', 'active', 'active partner', 'active on duty', 'confirmed', 'yes'):
+        return True
+    if s in ('false', '0', 'inactive', 'disabled', 'off duty', 'cancelled', 'no'):
+        return False
+    return default
+
+
 class DepartmentSerializer(serializers.ModelSerializer):
     id = serializers.CharField(source='dept_id', read_only=True)
     
@@ -10,11 +23,17 @@ class DepartmentSerializer(serializers.ModelSerializer):
         model = Department
         fields = '__all__'
 
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'status' in data_copy:
+            data_copy['status'] = parse_bool_status(data_copy['status'])
+        return super().to_internal_value(data_copy)
+
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         ret['id'] = instance.dept_id
         ret['dept_id'] = instance.dept_id
-        ret['status'] = getattr(instance, 'status', None) or 'Active'
+        ret['status'] = instance.status
         ret['location'] = getattr(instance, 'location', None) or 'Main Building'
         doc_count = instance.doctors.count()
         ret['doctor_count'] = doc_count if doc_count > 0 else (instance.doctor_count or 0)
@@ -66,6 +85,9 @@ class DoctorSerializer(serializers.ModelSerializer):
             else:
                 data_copy['department'] = None
 
+        if 'status' in data_copy:
+            data_copy['status'] = parse_bool_status(data_copy['status'])
+
         return super().to_internal_value(data_copy)
 
     def to_representation(self, instance):
@@ -88,8 +110,11 @@ class DoctorSerializer(serializers.ModelSerializer):
         ret['availableDays'] = instance.available_days or []
         ret['timeSlots'] = instance.time_slots or []
         ret['roomNumber'] = instance.room_number or ''
-        ret['acceptedPatientTypes'] = instance.accepted_patient_types or ["Private Self-Pay", "HMO Insurance"]
-        ret['status'] = instance.status or 'Active'
+        types = instance.accepted_patient_types
+        if not types or len(types) == 0:
+            types = ["Private Self-Pay", "HMO Insurance"]
+        ret['acceptedPatientTypes'] = types
+        ret['status'] = instance.status
         return ret
 
 
@@ -278,11 +303,16 @@ class SystemUserSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     last_active = serializers.SerializerMethodField()
     lastActive = serializers.SerializerMethodField()
+    last_login = serializers.SerializerMethodField()
+    lastLogin = serializers.SerializerMethodField()
+    created_at = serializers.SerializerMethodField()
+    createdAt = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
-            'id', 'user_id', 'name', 'email', 'password', 'role', 'desk', 'status', 'last_active', 'lastActive'
+            'id', 'user_id', 'name', 'email', 'password', 'role', 'desk', 'status',
+            'last_active', 'lastActive', 'last_login', 'lastLogin', 'created_at', 'createdAt'
         ]
 
     def get_id(self, obj):
@@ -294,11 +324,29 @@ class SystemUserSerializer(serializers.ModelSerializer):
     def get_status(self, obj):
         return 'Active' if obj.is_active else 'Disabled'
 
+    def get_last_login(self, obj):
+        if obj.last_login:
+            return obj.last_login.strftime("%Y-%m-%d %H:%M:%S")
+        if obj.date_joined:
+            return obj.date_joined.strftime("%Y-%m-%d %H:%M:%S")
+        return 'Never logged in'
+
+    def get_lastLogin(self, obj):
+        return self.get_last_login(obj)
+
     def get_last_active(self, obj):
-        return 'Just now'
+        return self.get_last_login(obj)
 
     def get_lastActive(self, obj):
-        return self.get_last_active(obj)
+        return self.get_last_login(obj)
+
+    def get_created_at(self, obj):
+        if obj.date_joined:
+            return obj.date_joined.strftime("%Y-%m-%d %H:%M:%S")
+        return ''
+
+    def get_createdAt(self, obj):
+        return self.get_created_at(obj)
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)

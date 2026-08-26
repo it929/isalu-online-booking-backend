@@ -32,7 +32,10 @@ class Command(BaseCommand):
             {'dept_id': 'ophthalmology', 'name': 'Ophthalmology & Eye Care', 'description': 'Comprehensive eye exams, vision care, and eye surgeries.', 'icon_name': 'Users', 'doctor_count': 1},
         ]
         for dept in departments:
-            Department.objects.get_or_create(dept_id=dept['dept_id'], defaults=dept)
+            d_obj, created = Department.objects.get_or_create(dept_id=dept['dept_id'], defaults={**dept, 'status': True})
+            if not created and not d_obj.status:
+                d_obj.status = True
+                d_obj.save()
 
         # 2. Doctors
         doctors = [
@@ -51,16 +54,19 @@ class Command(BaseCommand):
             dept_id_val = doc_data.pop('department_id', None)
             dept_obj = Department.objects.filter(dept_id=dept_id_val).first() if dept_id_val else None
             doc_data['department'] = dept_obj
-            Doctor.objects.get_or_create(doc_id=doc_data['doc_id'], defaults=doc_data)
+            doc_obj, created = Doctor.objects.get_or_create(doc_id=doc_data['doc_id'], defaults={**doc_data, 'status': True})
+            if not created and not doc_obj.status:
+                doc_obj.status = True
+                doc_obj.save()
 
         # 3. Specialist Schedules
         schedules = [
-            {'sched_id': 'sched-1', 'doctor_id': 'doc-1', 'doctor_name': 'Dr. Adewale Olusola', 'specialty': 'Cardiology', 'room': 'Suite 4B - Cardiology Wing', 'duty_days': ['Mon', 'Wed', 'Fri'], 'shift_time': '08:00 AM – 02:00 PM', 'capacity': 15, 'status': 'Active On Duty'},
-            {'sched_id': 'sched-2', 'doctor_id': 'doc-2', 'doctor_name': 'Dr. Folashade Adebayo', 'specialty': 'General Medicine', 'room': 'Room 102 - Outpatient', 'duty_days': ['Tue', 'Thu', 'Sat'], 'shift_time': '09:00 AM – 04:00 PM', 'capacity': 20, 'status': 'Active On Duty'},
-            {'sched_id': 'sched-3', 'doctor_id': 'doc-3', 'doctor_name': 'Dr. Chidi Nnamdi', 'specialty': 'Pediatrics', 'room': 'Pediatric Clinic Wing A', 'duty_days': ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'], 'shift_time': '08:30 AM – 03:30 PM', 'capacity': 18, 'status': 'Active On Duty'},
-            {'sched_id': 'sched-4', 'doctor_id': 'doc-4', 'doctor_name': 'Dr. Funke Akindele', 'specialty': 'Obstetrics & Gynecology', 'room': 'Maternity Suite 2', 'duty_days': ['Mon', 'Wed', 'Thu'], 'shift_time': '10:00 AM – 05:00 PM', 'capacity': 12, 'status': 'Active On Duty'},
-            {'sched_id': 'sched-5', 'doctor_id': 'doc-5', 'doctor_name': 'Dr. Babatunde Lawal', 'specialty': 'Ophthalmology', 'room': 'Eye Clinic Room 3', 'duty_days': ['Tue', 'Fri'], 'shift_time': '08:00 AM – 01:00 PM', 'capacity': 15, 'status': 'Active On Duty'},
-            {'sched_id': 'sched-6', 'doctor_id': 'doc-6', 'doctor_name': 'Dr. Ngozi Eze', 'specialty': 'Orthopedic Surgery', 'room': 'Orthopedic Wing B', 'duty_days': ['Wed', 'Sat'], 'shift_time': '11:00 AM – 06:00 PM', 'capacity': 10, 'status': 'Active On Duty'},
+            {'sched_id': 'sched-1', 'doctor_id': 'doc-1', 'doctor_name': 'Dr. Adewale Olusola', 'specialty': 'Cardiology', 'room': 'Suite 4B - Cardiology Wing', 'duty_days': ['Mon', 'Wed', 'Fri'], 'shift_time': '08:00 AM – 02:00 PM', 'capacity': 15, 'status': True},
+            {'sched_id': 'sched-2', 'doctor_id': 'doc-2', 'doctor_name': 'Dr. Folashade Adebayo', 'specialty': 'General Medicine', 'room': 'Room 102 - Outpatient', 'duty_days': ['Tue', 'Thu', 'Sat'], 'shift_time': '09:00 AM – 04:00 PM', 'capacity': 20, 'status': True},
+            {'sched_id': 'sched-3', 'doctor_id': 'doc-3', 'doctor_name': 'Dr. Chidi Nnamdi', 'specialty': 'Pediatrics', 'room': 'Pediatric Clinic Wing A', 'duty_days': ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'], 'shift_time': '08:30 AM – 03:30 PM', 'capacity': 18, 'status': True},
+            {'sched_id': 'sched-4', 'doctor_id': 'doc-4', 'doctor_name': 'Dr. Funke Akindele', 'specialty': 'Obstetrics & Gynecology', 'room': 'Maternity Suite 2', 'duty_days': ['Mon', 'Wed', 'Thu'], 'shift_time': '10:00 AM – 05:00 PM', 'capacity': 12, 'status': True},
+            {'sched_id': 'sched-5', 'doctor_id': 'doc-5', 'doctor_name': 'Dr. Babatunde Lawal', 'specialty': 'Ophthalmology', 'room': 'Eye Clinic Room 3', 'duty_days': ['Tue', 'Fri'], 'shift_time': '08:00 AM – 01:00 PM', 'capacity': 15, 'status': True},
+            {'sched_id': 'sched-6', 'doctor_id': 'doc-6', 'doctor_name': 'Dr. Ngozi Eze', 'specialty': 'Orthopedic Surgery', 'room': 'Orthopedic Wing B', 'duty_days': ['Wed', 'Sat'], 'shift_time': '11:00 AM – 06:00 PM', 'capacity': 10, 'status': True},
         ]
         for sched in schedules:
             sched_data = sched.copy()
@@ -71,11 +77,11 @@ class Command(BaseCommand):
 
         # 4. HMO Companies
         hmos = [
-            {'hmo_id': 'hmo-1', 'name': 'Hygeia HMO', 'code': 'HYG-9021', 'email': 'preauth@hygeiahmo.com', 'phone': '+234 700 494 342', 'contact_person': 'Mrs. Toyin Adeyemi', 'status': 'Active Partner'},
-            {'hmo_id': 'hmo-2', 'name': 'Reliance HMO', 'code': 'REL-4412', 'email': 'claims@reliancehmo.com', 'phone': '+234 1 700 1570', 'contact_person': 'Mr. Femi Ogunleye', 'status': 'Active Partner'},
-            {'hmo_id': 'hmo-3', 'name': 'AXA Mansard Health', 'code': 'AXA-8819', 'email': 'care@axamansard.com', 'phone': '+234 1 448 5433', 'contact_person': 'Dr. Sandra Okafor', 'status': 'Active Partner'},
-            {'hmo_id': 'hmo-4', 'name': 'Leadway Health HMO', 'code': 'LAD-3011', 'email': 'medical@leadwayhealth.com', 'phone': '+234 1 280 1000', 'contact_person': 'Mr. Segun Alabi', 'status': 'Active Partner'},
-            {'hmo_id': 'hmo-5', 'name': 'Avon HMO', 'code': 'AVN-5520', 'email': 'approvals@avonhmo.com', 'phone': '+234 700 286 6466', 'contact_person': 'Mrs. Chidimma Nwosu', 'status': 'Active Partner'},
+            {'hmo_id': 'hmo-1', 'name': 'Hygeia HMO', 'code': 'HYG-9021', 'email': 'preauth@hygeiahmo.com', 'phone': '+234 700 494 342', 'contact_person': 'Mrs. Toyin Adeyemi', 'status': True},
+            {'hmo_id': 'hmo-2', 'name': 'Reliance HMO', 'code': 'REL-4412', 'email': 'claims@reliancehmo.com', 'phone': '+234 1 700 1570', 'contact_person': 'Mr. Femi Ogunleye', 'status': True},
+            {'hmo_id': 'hmo-3', 'name': 'AXA Mansard Health', 'code': 'AXA-8819', 'email': 'care@axamansard.com', 'phone': '+234 1 448 5433', 'contact_person': 'Dr. Sandra Okafor', 'status': True},
+            {'hmo_id': 'hmo-4', 'name': 'Leadway Health HMO', 'code': 'LAD-3011', 'email': 'medical@leadwayhealth.com', 'phone': '+234 1 280 1000', 'contact_person': 'Mr. Segun Alabi', 'status': True},
+            {'hmo_id': 'hmo-5', 'name': 'Avon HMO', 'code': 'AVN-5520', 'email': 'approvals@avonhmo.com', 'phone': '+234 700 286 6466', 'contact_person': 'Mrs. Chidimma Nwosu', 'status': True},
         ]
         for hmo in hmos:
             HmoCompany.objects.get_or_create(hmo_id=hmo['hmo_id'], defaults=hmo)
@@ -83,12 +89,12 @@ class Command(BaseCommand):
         # 5. User Roles
         from api.models import Role
         roles = [
-            {'role_id': 'role-1', 'name': 'Super Administrator', 'description': 'Full administrative control over all hospital operations, user management, and clinic configurations.', 'primary_desk': 'analytics', 'allowed_desks': ['helpdesk', 'hmo', 'cashdesk', 'analytics', 'monitor', 'users', 'clinic', 'all_patients', 'checked_in_patients', 'hmo_enrollees', 'private_patients', 'create_specialist_schedule', 'disabled_bookings'], 'is_system_role': True, 'status': 'Active'},
-            {'role_id': 'role-2', 'name': 'Helpdesk Officer', 'description': 'Front-desk reception patient intake, queue checking, appointment registration, and patient directories.', 'primary_desk': 'helpdesk', 'allowed_desks': ['helpdesk', 'all_patients', 'checked_in_patients'], 'is_system_role': True, 'status': 'Active'},
-            {'role_id': 'role-3', 'name': 'HMO Approval Officer', 'description': 'Verification of HMO insurance policies, authorization coding, and HMO enrollees directory.', 'primary_desk': 'hmo', 'allowed_desks': ['hmo', 'hmo_enrollees'], 'is_system_role': True, 'status': 'Active'},
-            {'role_id': 'role-4', 'name': 'Cashdesk Billing Officer', 'description': 'Private self-pay payments clearance, billing invoicing, POS transactions, and private patient directory.', 'primary_desk': 'cashdesk', 'allowed_desks': ['cashdesk', 'private_patients'], 'is_system_role': True, 'status': 'Active'},
-            {'role_id': 'role-5', 'name': 'Monitor Desk Operator', 'description': 'Real-time consultation queue monitoring and live TV display management.', 'primary_desk': 'monitor', 'allowed_desks': ['monitor'], 'is_system_role': True, 'status': 'Active'},
-            {'role_id': 'role-6', 'name': 'Queue Analytics Officer', 'description': 'Executive intelligence, department throughput metrics, and AI board summaries.', 'primary_desk': 'analytics', 'allowed_desks': ['analytics'], 'is_system_role': True, 'status': 'Active'},
+            {'role_id': 'role-1', 'name': 'Super Administrator', 'description': 'Full administrative control over all hospital operations, user management, and clinic configurations.', 'primary_desk': 'analytics', 'allowed_desks': ['helpdesk', 'hmo', 'cashdesk', 'analytics', 'monitor', 'users', 'clinic', 'all_patients', 'checked_in_patients', 'hmo_enrollees', 'private_patients', 'create_specialist_schedule', 'disabled_bookings'], 'is_system_role': True, 'status': True},
+            {'role_id': 'role-2', 'name': 'Helpdesk Officer', 'description': 'Front-desk reception patient intake, queue checking, appointment registration, and patient directories.', 'primary_desk': 'helpdesk', 'allowed_desks': ['helpdesk', 'all_patients', 'checked_in_patients'], 'is_system_role': True, 'status': True},
+            {'role_id': 'role-3', 'name': 'HMO Approval Officer', 'description': 'Verification of HMO insurance policies, authorization coding, and HMO enrollees directory.', 'primary_desk': 'hmo', 'allowed_desks': ['hmo', 'hmo_enrollees'], 'is_system_role': True, 'status': True},
+            {'role_id': 'role-4', 'name': 'Cashdesk Billing Officer', 'description': 'Private self-pay payments clearance, billing invoicing, POS transactions, and private patient directory.', 'primary_desk': 'cashdesk', 'allowed_desks': ['cashdesk', 'private_patients'], 'is_system_role': True, 'status': True},
+            {'role_id': 'role-5', 'name': 'Monitor Desk Operator', 'description': 'Real-time consultation queue monitoring and live TV display management.', 'primary_desk': 'monitor', 'allowed_desks': ['monitor'], 'is_system_role': True, 'status': True},
+            {'role_id': 'role-6', 'name': 'Queue Analytics Officer', 'description': 'Executive intelligence, department throughput metrics, and AI board summaries.', 'primary_desk': 'analytics', 'allowed_desks': ['analytics'], 'is_system_role': True, 'status': True},
         ]
         for r in roles:
             Role.objects.update_or_create(

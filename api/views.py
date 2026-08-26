@@ -21,10 +21,14 @@ from .serializers import (
 
 from django.contrib.auth.hashers import check_password, make_password
 from django.contrib.auth.models import User
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class StaffLoginView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
         data = request.data or {}
@@ -85,10 +89,34 @@ class StaffLoginView(APIView):
         )
 
 class DepartmentViewSet(viewsets.ModelViewSet):
-    queryset = Department.objects.all()
     serializer_class = DepartmentSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'dept_id'
+
+    def get_queryset(self):
+        include_disabled = self.request.query_params.get('include_disabled') == 'true'
+        if include_disabled:
+            return Department.objects.all()
+        return Department.objects.filter(status=True)
+
+    def destroy(self, request, *args, **kwargs):
+        dept = self.get_object()
+        dept.status = False
+        dept.save()
+        return Response(
+            {"message": f"Department '{dept.name}' disabled successfully.", "data": DepartmentSerializer(dept).data},
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=['post'], url_path='restore')
+    def restore(self, request, pk=None):
+        dept = self.get_object()
+        dept.status = True
+        dept.save()
+        return Response(
+            {"message": f"Department '{dept.name}' restored successfully.", "data": DepartmentSerializer(dept).data},
+            status=status.HTTP_200_OK
+        )
 
 
 class DoctorViewSet(viewsets.ModelViewSet):
@@ -294,7 +322,7 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
 
 
 class SystemUserViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all().order_by('id')
+    queryset = User.objects.all().order_by('-date_joined', '-id')
     serializer_class = SystemUserSerializer
     permission_classes = [IsAuthenticated]
     lookup_field = 'id'
