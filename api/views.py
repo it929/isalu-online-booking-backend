@@ -7,7 +7,7 @@ from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 import random
 
-from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, SystemUser, CustomTimeSlot
+from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, CustomTimeSlot, Role, UserProfile
 from .serializers import (
     DepartmentSerializer,
     DoctorSerializer,
@@ -15,7 +15,8 @@ from .serializers import (
     BookingSerializer,
     HmoCompanySerializer,
     SystemUserSerializer,
-    CustomTimeSlotSerializer
+    CustomTimeSlotSerializer,
+    RoleSerializer
 )
 
 from django.contrib.auth.hashers import check_password, make_password
@@ -36,86 +37,47 @@ class StaffLoginView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 1. Try standard Django User authentication (by username or email)
+        # Check if user account is disabled first
+        user_obj = (
+            User.objects.filter(email__iexact=username_input).first()
+            or User.objects.filter(username__iexact=username_input).first()
+        )
+        if user_obj and not user_obj.is_active:
+            user_name = user_obj.first_name or user_obj.username
+            return Response(
+                {"error": f"Account Access Disabled: Staff account for '{user_name}' has been disabled by the Administrator."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Try authenticating
         user = authenticate(username=username_input, password=password_input)
-        if not user:
-            user_obj = User.objects.filter(email__iexact=username_input).first()
-            if user_obj:
-                user = authenticate(username=user_obj.username, password=password_input)
+        if not user and user_obj:
+            user = authenticate(username=user_obj.username, password=password_input)
 
         if user and user.is_active:
             refresh = RefreshToken.for_user(user)
-            user_display_name = user.get_full_name() or ("Dr. Chief Administrator" if user.username == "admin" else user.username.capitalize())
+            role_name = "Super Administrator" if user.is_superuser else "Helpdesk Officer"
+            desk_name = "All Access" if user.is_superuser else "Helpdesk Reception"
+
+            if hasattr(user, 'profile') and user.profile and user.profile.role:
+                role_name = user.profile.role.name
+                desk_name = user.profile.role.primary_desk
+
+            user_display_name = user.first_name or user.username
             return Response({
                 "message": "Staff login successful",
                 "user": {
                     "username": user.username,
                     "email": user.email or f"{user.username}@isaluhospitals.com",
                     "name": user_display_name,
-                    "role": "Super Administrator" if user.is_superuser else "Hospital Staff",
-                    "desk": "All Access" if user.is_superuser else "Hospital Desk",
+                    "role": role_name,
+                    "desk": desk_name,
                 },
                 "tokens": {
                     "refresh": str(refresh),
                     "access": str(refresh.access_token),
                 }
             }, status=status.HTTP_200_OK)
-
-        # 2. Check SystemUser records strictly by exact email or name
-        disabled_sys_user = SystemUser.objects.filter(email__iexact=username_input, status="Disabled").first()
-        if disabled_sys_user:
-            return Response(
-                {"error": f"Account Access Disabled: Staff account for '{disabled_sys_user.name}' has been disabled by the Administrator."},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        sys_user = (
-            SystemUser.objects.filter(email__iexact=username_input, status="Active").first()
-            or SystemUser.objects.filter(name__iexact=username_input, status="Active").first()
-        )
-
-        if sys_user:
-            is_valid_password = False
-
-            if check_password(password_input, sys_user.password):
-                is_valid_password = True
-            elif password_input == sys_user.password:
-                # If legacy plaintext password matched, auto-hash and save
-                sys_user.password = make_password(password_input)
-                sys_user.save()
-                is_valid_password = True
-
-            if is_valid_password:
-                clean_username = sys_user.email.lower() if sys_user.email else f"user_{sys_user.user_id}".lower()
-                django_user = User.objects.filter(email__iexact=sys_user.email).first() or User.objects.filter(username__iexact=clean_username).first()
-
-                if not django_user:
-                    django_user = User.objects.create_user(
-                        username=clean_username,
-                        email=sys_user.email,
-                        password=password_input,
-                        first_name=sys_user.name,
-                        is_staff=True
-                    )
-                else:
-                    django_user.set_password(password_input)
-                    django_user.save()
-
-                refresh = RefreshToken.for_user(django_user)
-                return Response({
-                    "message": "System user authenticated successfully",
-                    "user": {
-                        "username": sys_user.email,
-                        "email": sys_user.email,
-                        "name": sys_user.name,
-                        "role": sys_user.role,
-                        "desk": sys_user.desk,
-                    },
-                    "tokens": {
-                        "access": str(refresh.access_token),
-                        "refresh": str(refresh),
-                    }
-                }, status=status.HTTP_200_OK)
 
         return Response(
             {"error": "Invalid email or password. Please check your credentials and try again."},
@@ -130,10 +92,21 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
 
 class DoctorViewSet(viewsets.ModelViewSet):
-    queryset = Doctor.objects.all()
     serializer_class = DoctorSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'doc_id'
+
+    def get_queryset(self):
+        queryset = Doctor.objects.all().select_related('department')
+        dept_param = self.request.query_params.get('department') or self.request.query_params.get('department_id') or self.request.query_params.get('dept_id')
+        if dept_param and dept_param != 'all':
+            from django.db.models import Q
+            dept_clean = dept_param.strip().lower()
+            queryset = queryset.filter(
+                Q(department__dept_id__iexact=dept_clean) |
+                Q(department__name__iexact=dept_clean)
+            )
+        return queryset
 
 
 class SpecialistScheduleViewSet(viewsets.ModelViewSet):
@@ -325,10 +298,17 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
 
 
 class SystemUserViewSet(viewsets.ModelViewSet):
-    queryset = SystemUser.objects.all()
+    queryset = User.objects.all().order_by('id')
     serializer_class = SystemUserSerializer
     permission_classes = [IsAuthenticated]
-    lookup_field = 'user_id'
+    lookup_field = 'id'
+
+    def get_object(self):
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        val = str(self.kwargs[lookup_url_kwarg])
+        if val.startswith('usr-'):
+            val = val.replace('usr-', '')
+        return User.objects.get(id=val)
 
 
 class CustomTimeSlotViewSet(viewsets.ModelViewSet):
@@ -336,3 +316,11 @@ class CustomTimeSlotViewSet(viewsets.ModelViewSet):
     serializer_class = CustomTimeSlotSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'slot_id'
+
+
+class RoleViewSet(viewsets.ModelViewSet):
+    queryset = Role.objects.all()
+    serializer_class = RoleSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+    lookup_field = 'role_id'
+

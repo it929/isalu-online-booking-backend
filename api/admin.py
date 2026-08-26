@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, SystemUser, CustomTimeSlot
+from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, CustomTimeSlot, Role, UserProfile
 
 @admin.register(Department)
 class DepartmentAdmin(admin.ModelAdmin):
@@ -9,9 +9,9 @@ class DepartmentAdmin(admin.ModelAdmin):
 
 @admin.register(Doctor)
 class DoctorAdmin(admin.ModelAdmin):
-    list_display = ('doc_id', 'full_name', 'name', 'acronym', 'specialty', 'room_number')
+    list_display = ('doc_id', 'full_name', 'name', 'acronym', 'specialty', 'department', 'room_number')
     search_fields = ('doc_id', 'full_name', 'name', 'acronym', 'specialty')
-    list_filter = ('specialty', 'department_id')
+    list_filter = ('specialty', 'department')
 
 
 @admin.register(SpecialistSchedule)
@@ -35,11 +35,18 @@ class HmoCompanyAdmin(admin.ModelAdmin):
     list_filter = ('status',)
 
 
-@admin.register(SystemUser)
-class SystemUserAdmin(admin.ModelAdmin):
-    list_display = ('user_id', 'name', 'email', 'role', 'desk', 'status', 'last_active')
-    search_fields = ('name', 'email', 'role')
-    list_filter = ('role', 'status')
+@admin.register(Role)
+class RoleAdmin(admin.ModelAdmin):
+    list_display = ('role_id', 'name', 'primary_desk', 'is_system_role', 'status')
+    search_fields = ('name', 'description')
+    list_filter = ('is_system_role', 'status')
+
+
+@admin.register(UserProfile)
+class UserProfileAdmin(admin.ModelAdmin):
+    list_display = ('user', 'role')
+    search_fields = ('user__username', 'user__email', 'user__first_name')
+    list_filter = ('role',)
 
 
 @admin.register(CustomTimeSlot)

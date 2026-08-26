@@ -23,7 +23,7 @@ class Doctor(models.Model):
     full_name = models.CharField(max_length=200, blank=True, default='', help_text="Full real name for Admin (e.g. Dr. Adewale Olusola)")
     acronym = models.CharField(max_length=50, blank=True, default='', help_text="Saved acronym (e.g. Specialist A)")
     specialty = models.CharField(max_length=200)
-    department_id = models.CharField(max_length=100, default='pediatrics')
+    department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True, related_name='doctors')
     qualification = models.CharField(max_length=250, default='MBBS, FWACS')
     qualifications = models.CharField(max_length=250, default='MBBS, FWACS')
     available_days = models.JSONField(default=list, blank=True)
@@ -43,7 +43,7 @@ class Doctor(models.Model):
 
 class SpecialistSchedule(models.Model):
     sched_id = models.CharField(max_length=100, primary_key=True)
-    doctor_id = models.CharField(max_length=100)
+    doctor = models.ForeignKey(Doctor, on_delete=models.SET_NULL, null=True, blank=True, related_name='schedules')
     doctor_name = models.CharField(max_length=200)
     specialty = models.CharField(max_length=200)
     room = models.CharField(max_length=200, default='Consultation Suite')
@@ -110,32 +110,36 @@ class HmoCompany(models.Model):
 
 
 from django.contrib.auth.hashers import make_password
+from django.contrib.auth.models import User
 
 
-class SystemUser(models.Model):
-    user_id = models.CharField(max_length=100, primary_key=True)
-    name = models.CharField(max_length=200)
-    email = models.EmailField(unique=True)
-    password = models.CharField(max_length=255, default='admin123')
-    role = models.CharField(max_length=100, default='Helpdesk Officer')
-    desk = models.CharField(max_length=100, default='Helpdesk Reception')
+class Role(models.Model):
+    role_id = models.CharField(max_length=100, primary_key=True)
+    name = models.CharField(max_length=200, unique=True)
+    description = models.TextField(blank=True, default='')
+    primary_desk = models.CharField(max_length=100, default='helpdesk')
+    allowed_desks = models.JSONField(default=list, blank=True)
+    is_system_role = models.BooleanField(default=False)
     status = models.CharField(max_length=50, default='Active')
-    last_active = models.CharField(max_length=100, default='Just now')
+    created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
         ordering = ['name']
 
-    def save(self, *args, **kwargs):
-        if self.password and not (
-            self.password.startswith('pbkdf2_') or
-            self.password.startswith('argon2') or
-            self.password.startswith('bcrypt')
-        ):
-            self.password = make_password(self.password)
-        super().save(*args, **kwargs)
+    def __str__(self):
+        return f"{self.name} ({self.primary_desk})"
+
+
+class UserProfile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, primary_key=True, related_name='profile')
+    role = models.ForeignKey(Role, on_delete=models.SET_NULL, null=True, blank=True, related_name='user_profiles')
+
+    class Meta:
+        ordering = ['user__first_name', 'user__username']
 
     def __str__(self):
-        return f"{self.name} - {self.role}"
+        return f"{self.user.username} - {self.role.name if self.role else 'No Role'}"
+
 
 
 class CustomTimeSlot(models.Model):
@@ -148,3 +152,5 @@ class CustomTimeSlot(models.Model):
 
     def __str__(self):
         return self.label
+
+

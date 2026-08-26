@@ -1,5 +1,7 @@
 from rest_framework import serializers
-from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, SystemUser, CustomTimeSlot
+from django.contrib.auth.models import User
+import time
+from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, CustomTimeSlot, Role, UserProfile
 
 class DepartmentSerializer(serializers.ModelSerializer):
     id = serializers.CharField(source='dept_id', read_only=True)
@@ -11,8 +13,12 @@ class DepartmentSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         ret['id'] = instance.dept_id
+        ret['dept_id'] = instance.dept_id
         ret['status'] = getattr(instance, 'status', None) or 'Active'
         ret['location'] = getattr(instance, 'location', None) or 'Main Building'
+        doc_count = instance.doctors.count()
+        ret['doctor_count'] = doc_count if doc_count > 0 else (instance.doctor_count or 0)
+        ret['doctorCount'] = ret['doctor_count']
         return ret
 
 
@@ -41,7 +47,6 @@ class DoctorSerializer(serializers.ModelSerializer):
 
         mapping = {
             'fullName': 'full_name',
-            'departmentId': 'department_id',
             'availableDays': 'available_days',
             'timeSlots': 'time_slots',
             'roomNumber': 'room_number',
@@ -52,13 +57,34 @@ class DoctorSerializer(serializers.ModelSerializer):
                 data_copy[snake] = data_copy[camel]
                 data_copy.pop(camel, None)
 
+        dept_val = data_copy.get('department_id') or data_copy.get('departmentId') or data_copy.get('department')
+        if dept_val:
+            dept_str = str(dept_val).strip()
+            dept_obj = Department.objects.filter(dept_id__iexact=dept_str).first()
+            if dept_obj:
+                data_copy['department'] = dept_obj.dept_id
+            else:
+                data_copy['department'] = None
+
         return super().to_internal_value(data_copy)
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
         ret['id'] = instance.doc_id
+        ret['doc_id'] = instance.doc_id
         ret['fullName'] = instance.full_name or instance.name
-        ret['departmentId'] = instance.department_id
+        ret['departmentId'] = instance.department.dept_id if instance.department else (getattr(instance, 'department_id', None) or '')
+        ret['department_id'] = ret['departmentId']
+        if instance.department:
+            ret['department'] = {
+                'dept_id': instance.department.dept_id,
+                'id': instance.department.dept_id,
+                'name': instance.department.name,
+                'description': instance.department.description,
+                'icon_name': instance.department.icon_name,
+            }
+        else:
+            ret['department'] = None
         ret['availableDays'] = instance.available_days or []
         ret['timeSlots'] = instance.time_slots or []
         ret['roomNumber'] = instance.room_number or ''
@@ -87,7 +113,6 @@ class SpecialistScheduleSerializer(serializers.ModelSerializer):
             data_copy['sched_id'] = sched_id_val
 
         mapping = {
-            'doctorId': 'doctor_id',
             'doctorName': 'doctor_name',
             'dutyDays': 'duty_days',
             'dayConfigs': 'day_configs',
@@ -100,13 +125,29 @@ class SpecialistScheduleSerializer(serializers.ModelSerializer):
                     data_copy[snake] = data_copy[camel]
                 data_copy.pop(camel, None)
 
+        doc_val = data_copy.get('doctor_id') or data_copy.get('doctorId') or data_copy.get('doctor')
+        if doc_val:
+            doc_str = str(doc_val).strip()
+            doc_obj = Doctor.objects.filter(doc_id__iexact=doc_str).first()
+            if doc_obj:
+                data_copy['doctor'] = doc_obj.doc_id
+                if not data_copy.get('doctor_name'):
+                    data_copy['doctor_name'] = doc_obj.full_name or doc_obj.name
+                if not data_copy.get('specialty'):
+                    data_copy['specialty'] = doc_obj.specialty
+            else:
+                data_copy['doctor'] = None
+
         return super().to_internal_value(data_copy)
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
+        doc_id_val = instance.doctor.doc_id if instance.doctor else (getattr(instance, 'doctor_id', None) or '')
+        doc_name_val = instance.doctor_name or (instance.doctor.full_name if instance.doctor else '')
         ret['id'] = instance.sched_id
-        ret['doctorId'] = instance.doctor_id
-        ret['doctorName'] = instance.doctor_name
+        ret['doctorId'] = doc_id_val
+        ret['doctor_id'] = doc_id_val
+        ret['doctorName'] = doc_name_val
         ret['dutyDays'] = instance.duty_days or []
         ret['dayConfigs'] = instance.day_configs or {}
         ret['shiftTime'] = instance.shift_time
@@ -227,22 +268,133 @@ class HmoCompanySerializer(serializers.ModelSerializer):
 
 
 class SystemUserSerializer(serializers.ModelSerializer):
-    id = serializers.CharField(source='user_id', required=False)
-    user_id = serializers.CharField(required=False)
-    password = serializers.CharField(required=False, default='admin123')
-    lastActive = serializers.CharField(source='last_active', required=False)
+    id = serializers.SerializerMethodField()
+    user_id = serializers.SerializerMethodField()
+    name = serializers.CharField(source='first_name', required=False, allow_blank=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    password = serializers.CharField(write_only=True, required=False)
+    role = serializers.CharField(required=False, allow_blank=True)
+    desk = serializers.CharField(required=False, allow_blank=True)
+    status = serializers.SerializerMethodField()
+    last_active = serializers.SerializerMethodField()
+    lastActive = serializers.SerializerMethodField()
 
     class Meta:
-        model = SystemUser
+        model = User
         fields = [
             'id', 'user_id', 'name', 'email', 'password', 'role', 'desk', 'status', 'last_active', 'lastActive'
         ]
 
+    def get_id(self, obj):
+        return f"usr-{obj.id}"
+
+    def get_user_id(self, obj):
+        return f"usr-{obj.id}"
+
+    def get_status(self, obj):
+        return 'Active' if obj.is_active else 'Disabled'
+
+    def get_last_active(self, obj):
+        return 'Just now'
+
+    def get_lastActive(self, obj):
+        return self.get_last_active(obj)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        role_name = 'Helpdesk Officer'
+        desk_name = 'helpdesk'
+
+        if hasattr(instance, 'profile') and instance.profile and instance.profile.role:
+            role_name = instance.profile.role.name
+            desk_name = instance.profile.role.primary_desk
+        elif instance.is_superuser:
+            role_name = 'Super Administrator'
+            desk_name = 'analytics'
+
+        ret['role'] = role_name
+        ret['desk'] = desk_name
+        ret['name'] = instance.first_name or instance.username
+        return ret
+
     def create(self, validated_data):
         import time
-        user_id = validated_data.get('user_id') or validated_data.get('id') or f"usr-{int(time.time() * 1000)}"
-        validated_data['user_id'] = user_id
-        return super().create(validated_data)
+        initial_data = self.initial_data or {}
+        raw_password = validated_data.get('password') or initial_data.get('password') or 'admin123'
+        email = (validated_data.get('email') or initial_data.get('email') or '').strip().lower()
+        name = (
+            validated_data.get('first_name')
+            or initial_data.get('name')
+            or (email.split('@')[0] if email else 'Staff User')
+        )
+        role_name = initial_data.get('role') or 'Helpdesk Officer'
+        status_input = initial_data.get('status', 'Active')
+
+        clean_username = email if email else f"user_{int(time.time() * 1000)}".lower()
+
+        # Check if user already exists in User table
+        user = User.objects.filter(email__iexact=email).first() if email else None
+        if not user:
+            user = User.objects.filter(username__iexact=clean_username).first()
+
+        if user:
+            user.first_name = name
+            if raw_password:
+                user.set_password(raw_password)
+            user.is_staff = True
+            user.is_active = (status_input != 'Disabled')
+            user.save()
+        else:
+            user = User.objects.create_user(
+                username=clean_username,
+                email=email,
+                password=raw_password,
+                first_name=name,
+                is_staff=True,
+                is_active=(status_input != 'Disabled')
+            )
+
+        role_obj = Role.objects.filter(name__iexact=role_name).first()
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        if role_obj:
+            profile.role = role_obj
+            profile.save()
+
+        return user
+
+    def update(self, instance, validated_data):
+        initial_data = self.initial_data or {}
+
+        email = (validated_data.get('email') or initial_data.get('email') or '').strip().lower()
+        if email:
+            instance.email = email
+            instance.username = email
+
+        name = validated_data.get('first_name') or initial_data.get('name')
+        if name:
+            instance.first_name = name
+
+        password = validated_data.get('password') or initial_data.get('password')
+        if password and not (password.startswith('pbkdf2_') or password.startswith('argon2')):
+            instance.set_password(password)
+
+        status_input = initial_data.get('status')
+        if status_input:
+            instance.is_active = (status_input != 'Disabled')
+
+        instance.save()
+
+        profile, _ = UserProfile.objects.get_or_create(user=instance)
+        role_name = initial_data.get('role')
+        if role_name:
+            role_obj = Role.objects.filter(name__iexact=role_name).first()
+            if role_obj:
+                profile.role = role_obj
+                profile.save()
+
+        return instance
+
+
 
 
 class CustomTimeSlotSerializer(serializers.ModelSerializer):
@@ -258,3 +410,27 @@ class CustomTimeSlotSerializer(serializers.ModelSerializer):
         slot_id = validated_data.get('slot_id') or validated_data.get('id') or f"slot-{int(time.time() * 1000)}"
         validated_data['slot_id'] = slot_id
         return super().create(validated_data)
+
+
+class RoleSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(source='role_id', required=False)
+    role_id = serializers.CharField(required=False)
+    primaryDesk = serializers.CharField(source='primary_desk', required=False)
+    allowedDesks = serializers.JSONField(source='allowed_desks', required=False)
+    isSystemRole = serializers.BooleanField(source='is_system_role', required=False)
+    createdAt = serializers.DateTimeField(source='created_at', required=False)
+
+    class Meta:
+        model = Role
+        fields = [
+            'id', 'role_id', 'name', 'description', 'primary_desk', 'primaryDesk',
+            'allowed_desks', 'allowedDesks', 'is_system_role', 'isSystemRole',
+            'status', 'created_at', 'createdAt'
+        ]
+
+    def create(self, validated_data):
+        import time
+        role_id = validated_data.get('role_id') or validated_data.get('id') or f"role-{int(time.time() * 1000)}"
+        validated_data['role_id'] = role_id
+        return super().create(validated_data)
+

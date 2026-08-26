@@ -8,7 +8,8 @@ from .views import (
     BookingViewSet,
     HmoCompanyViewSet,
     SystemUserViewSet,
-    CustomTimeSlotViewSet
+    CustomTimeSlotViewSet,
+    RoleViewSet
 )
 
 router = DefaultRouter()
@@ -19,6 +20,7 @@ router.register(r'bookings', BookingViewSet, basename='booking')
 router.register(r'hmo-companies', HmoCompanyViewSet, basename='hmocompany')
 router.register(r'users', SystemUserViewSet, basename='systemuser')
 router.register(r'time-slots', CustomTimeSlotViewSet, basename='timeslot')
+router.register(r'roles', RoleViewSet, basename='role')
 
 urlpatterns = [
     path('auth/staff-login/', StaffLoginView.as_view(), name='staff-login'),
