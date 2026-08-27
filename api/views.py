@@ -94,10 +94,31 @@ class DepartmentViewSet(viewsets.ModelViewSet):
     lookup_field = 'dept_id'
 
     def get_queryset(self):
+        queryset = Department.objects.all()
+        if self.action in ['retrieve', 'update', 'partial_update', 'destroy', 'restore']:
+            return queryset
+
         include_disabled = self.request.query_params.get('include_disabled') == 'true'
-        if include_disabled:
-            return Department.objects.all()
-        return Department.objects.filter(status=True)
+        status_param = self.request.query_params.get('status')
+        search_param = self.request.query_params.get('search')
+
+        if status_param:
+            st = str(status_param).strip().lower()
+            if st in ('active', 'true', '1'):
+                queryset = queryset.filter(status=True)
+            elif st in ('disabled', 'maintenance', 'under maintenance', 'inactive', 'false', '0'):
+                queryset = queryset.filter(status=False)
+        elif not include_disabled:
+            queryset = queryset.filter(status=True)
+
+        if search_param:
+            from django.db.models import Q
+            q = str(search_param).strip()
+            queryset = queryset.filter(
+                Q(name__icontains=q) | Q(dept_id__icontains=q) | Q(description__icontains=q) | Q(location__icontains=q)
+            )
+
+        return queryset
 
     def destroy(self, request, *args, **kwargs):
         dept = self.get_object()
@@ -109,7 +130,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         )
 
     @action(detail=True, methods=['post'], url_path='restore')
-    def restore(self, request, pk=None):
+    def restore(self, request, *args, **kwargs):
         dept = self.get_object()
         dept.status = True
         dept.save()
@@ -324,7 +345,7 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
 class SystemUserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by('-date_joined', '-id')
     serializer_class = SystemUserSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     lookup_field = 'id'
 
     def get_object(self):
@@ -345,7 +366,7 @@ class CustomTimeSlotViewSet(viewsets.ModelViewSet):
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'role_id'
 
     def get_object(self):

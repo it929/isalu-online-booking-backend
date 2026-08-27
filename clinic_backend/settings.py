@@ -100,14 +100,32 @@ SIMPLE_JWT = {
 }
 
 # CORS & CSRF Configuration for Mobile & Web Clients
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'True' if DEBUG else 'False').lower() in ('true', '1')
 CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = [
+
+cors_allowed_hosts = os.getenv('CORS_ALLOWED_ORIGINS', '').split(',')
+if cors_allowed_hosts and cors_allowed_hosts[0]:
+    CORS_ALLOWED_ORIGINS = [h.strip() for h in cors_allowed_hosts if h.strip()]
+
+custom_csrf_origins = os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',')
+default_csrf_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:8000",
 ]
+if custom_csrf_origins and custom_csrf_origins[0]:
+    CSRF_TRUSTED_ORIGINS = default_csrf_origins + [o.strip() for o in custom_csrf_origins if o.strip()]
+else:
+    CSRF_TRUSTED_ORIGINS = default_csrf_origins
+
+# Production Security Headers
+if not DEBUG:
+    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True').lower() in ('true', '1')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_BROWSER_XSS_FILTER = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

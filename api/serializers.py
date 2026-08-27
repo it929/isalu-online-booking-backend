@@ -11,7 +11,7 @@ def parse_bool_status(val, default=True):
     s = str(val).strip().lower()
     if s in ('true', '1', 'active', 'active partner', 'active on duty', 'confirmed', 'yes'):
         return True
-    if s in ('false', '0', 'inactive', 'disabled', 'off duty', 'cancelled', 'no'):
+    if s in ('false', '0', 'inactive', 'disabled', 'off duty', 'cancelled', 'no', 'maintenance', 'under maintenance'):
         return False
     return default
 
