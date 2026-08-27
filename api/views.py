@@ -90,7 +90,7 @@ class StaffLoginView(APIView):
 
 class DepartmentViewSet(viewsets.ModelViewSet):
     serializer_class = DepartmentSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'dept_id'
 
     def get_queryset(self):
@@ -142,7 +142,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
 class DoctorViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'doc_id'
 
     def get_queryset(self):
@@ -157,12 +157,13 @@ class DoctorViewSet(viewsets.ModelViewSet):
 class SpecialistScheduleViewSet(viewsets.ModelViewSet):
     queryset = SpecialistSchedule.objects.all()
     serializer_class = SpecialistScheduleSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'sched_id'
 
 
 class BookingViewSet(viewsets.ModelViewSet):
     serializer_class = BookingSerializer
+    permission_classes = [AllowAny]
     lookup_field = 'ref_code'
 
     def get_queryset(self):
@@ -319,7 +320,7 @@ class BookingViewSet(viewsets.ModelViewSet):
 class HmoCompanyViewSet(viewsets.ModelViewSet):
     queryset = HmoCompany.objects.all()
     serializer_class = HmoCompanySerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'hmo_id'
 
     def create(self, request, *args, **kwargs):
@@ -359,14 +360,14 @@ class SystemUserViewSet(viewsets.ModelViewSet):
 class CustomTimeSlotViewSet(viewsets.ModelViewSet):
     queryset = CustomTimeSlot.objects.all()
     serializer_class = CustomTimeSlotSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'slot_id'
 
 
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'role_id'
 
     def get_object(self):
