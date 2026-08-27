@@ -402,13 +402,47 @@ class SystemUserSerializer(serializers.ModelSerializer):
                 is_active=(status_input != 'Disabled')
             )
 
-        role_obj = Role.objects.filter(name__iexact=role_name).first()
+        role_obj = self._resolve_or_create_role(role_name)
         profile, _ = UserProfile.objects.get_or_create(user=user)
         if role_obj:
             profile.role = role_obj
             profile.save()
 
         return user
+
+    def _resolve_or_create_role(self, role_name):
+        if not role_name:
+            return None
+        r_clean = str(role_name).strip()
+        role_obj = (
+            Role.objects.filter(name__iexact=r_clean).first()
+            or Role.objects.filter(role_id__iexact=r_clean).first()
+            or Role.objects.filter(name__icontains=r_clean).first()
+        )
+        if not role_obj:
+            lower = r_clean.lower()
+            if 'monitor' in lower or 'controller' in lower:
+                primary = 'monitor'
+            elif 'hmo' in lower or 'insurance' in lower:
+                primary = 'hmo'
+            elif 'cash' in lower or 'billing' in lower:
+                primary = 'cashdesk'
+            elif 'analytics' in lower or 'executive' in lower:
+                primary = 'analytics'
+            else:
+                primary = 'helpdesk'
+
+            import time
+            role_obj = Role.objects.create(
+                role_id=f"role-{int(time.time() * 1000)}",
+                name=r_clean,
+                description=f"Custom role: {r_clean}",
+                primary_desk=primary,
+                allowed_desks=[primary],
+                is_system_role=False,
+                status=True
+            )
+        return role_obj
 
     def update(self, instance, validated_data):
         initial_data = self.initial_data or {}
@@ -435,14 +469,12 @@ class SystemUserSerializer(serializers.ModelSerializer):
         profile, _ = UserProfile.objects.get_or_create(user=instance)
         role_name = initial_data.get('role')
         if role_name:
-            role_obj = Role.objects.filter(name__iexact=role_name).first()
+            role_obj = self._resolve_or_create_role(role_name)
             if role_obj:
                 profile.role = role_obj
                 profile.save()
 
         return instance
-
-
 
 
 class CustomTimeSlotSerializer(serializers.ModelSerializer):
@@ -463,10 +495,15 @@ class CustomTimeSlotSerializer(serializers.ModelSerializer):
 class RoleSerializer(serializers.ModelSerializer):
     id = serializers.CharField(source='role_id', required=False)
     role_id = serializers.CharField(required=False)
+    primary_desk = serializers.CharField(required=False, default='helpdesk')
     primaryDesk = serializers.CharField(source='primary_desk', required=False)
+    allowed_desks = serializers.JSONField(required=False, default=list)
     allowedDesks = serializers.JSONField(source='allowed_desks', required=False)
+    is_system_role = serializers.BooleanField(required=False, default=False)
     isSystemRole = serializers.BooleanField(source='is_system_role', required=False)
+    created_at = serializers.DateTimeField(required=False)
     createdAt = serializers.DateTimeField(source='created_at', required=False)
+    status = serializers.BooleanField(required=False, default=True)
 
     class Meta:
         model = Role
@@ -476,9 +513,44 @@ class RoleSerializer(serializers.ModelSerializer):
             'status', 'created_at', 'createdAt'
         ]
 
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+
+        # Handle status string 'Active' / 'Disabled' or bool
+        status_val = data.get('status')
+        if isinstance(status_val, str):
+            if status_val.lower().strip() in ['active', 'true', '1', 'enabled']:
+                data['status'] = True
+            elif status_val.lower().strip() in ['disabled', 'inactive', 'false', '0']:
+                data['status'] = False
+        elif status_val is None:
+            data['status'] = True
+
+        # Handle camelCase vs snake_case field aliases
+        if 'primaryDesk' in data and 'primary_desk' not in data:
+            data['primary_desk'] = data['primaryDesk']
+        if 'allowedDesks' in data and 'allowed_desks' not in data:
+            data['allowed_desks'] = data['allowedDesks']
+        if 'isSystemRole' in data and 'is_system_role' not in data:
+            data['is_system_role'] = data['isSystemRole']
+
+        return super().to_internal_value(data)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['id'] = instance.role_id
+        ret['role_id'] = instance.role_id
+        ret['primaryDesk'] = instance.primary_desk
+        ret['primary_desk'] = instance.primary_desk
+        ret['allowedDesks'] = instance.allowed_desks or []
+        ret['allowed_desks'] = instance.allowed_desks or []
+        ret['isSystemRole'] = instance.is_system_role
+        ret['is_system_role'] = instance.is_system_role
+        ret['status'] = 'Active' if instance.status else 'Disabled'
+        return ret
+
     def create(self, validated_data):
         import time
         role_id = validated_data.get('role_id') or validated_data.get('id') or f"role-{int(time.time() * 1000)}"
         validated_data['role_id'] = role_id
         return super().create(validated_data)
-

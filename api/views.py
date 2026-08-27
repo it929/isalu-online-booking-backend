@@ -324,7 +324,7 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
 class SystemUserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by('-date_joined', '-id')
     serializer_class = SystemUserSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     lookup_field = 'id'
 
     def get_object(self):
@@ -345,6 +345,36 @@ class CustomTimeSlotViewSet(viewsets.ModelViewSet):
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'role_id'
+
+    def get_object(self):
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        val = str(self.kwargs[lookup_url_kwarg])
+        role = Role.objects.filter(role_id=val).first()
+        if not role:
+            role = Role.objects.filter(name__iexact=val).first()
+        if not role:
+            role = super().get_object()
+        return role
+
+    def create(self, request, *args, **kwargs):
+        role_id = request.data.get('role_id') or request.data.get('id')
+        name = request.data.get('name')
+        if role_id:
+            existing = Role.objects.filter(role_id=role_id).first()
+            if existing:
+                serializer = self.get_serializer(existing, data=request.data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+        if name:
+            existing = Role.objects.filter(name__iexact=str(name).strip()).first()
+            if existing:
+                serializer = self.get_serializer(existing, data=request.data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+        return super().create(request, *args, **kwargs)
+
 
