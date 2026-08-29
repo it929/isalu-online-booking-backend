@@ -25,6 +25,28 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 
+def is_staff_request(request):
+    if hasattr(request, 'user') and request.user and request.user.is_authenticated:
+        return True
+
+    auth_header = request.headers.get('Authorization') or request.META.get('HTTP_AUTHORIZATION', '')
+    if auth_header and (auth_header.startswith('Bearer ') or auth_header.startswith('Token ')):
+        token_str = auth_header.split(' ')[1].strip()
+        if token_str and token_str != 'null' and token_str != 'undefined':
+            try:
+                from rest_framework_simplejwt.tokens import AccessToken
+                validated_token = AccessToken(token_str)
+                user_id = validated_token.get('user_id')
+                if user_id:
+                    user = User.objects.filter(id=user_id).first()
+                    if user and user.is_active:
+                        request.user = user
+                        return True
+            except Exception:
+                pass
+    return False
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class StaffLoginView(APIView):
     permission_classes = [AllowAny]
@@ -281,10 +303,20 @@ class BookingViewSet(viewsets.ModelViewSet):
             return Booking.objects.all()
         return Booking.objects.filter(is_active=True).exclude(status="Disabled")
 
-    def get_permissions(self):
-        return [AllowAny()]
+    def list(self, request, *args, **kwargs):
+        if not is_staff_request(request):
+            return Response(
+                {"detail": "Authentication required. Access to patient booking registry is restricted to authorized hospital staff."},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        return super().list(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
+        if not is_staff_request(request):
+            return Response(
+                {"detail": "Authentication required. Only authorized hospital staff can delete or disable appointment records."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         booking = self.get_object()
         reason = request.data.get('reason') or request.data.get('delete_reason') or request.data.get('deleteReason') or "Disabled by Administrator"
         booking.is_active = False
@@ -466,7 +498,21 @@ class SystemUserViewSet(viewsets.ModelViewSet):
             val = val.replace('usr-', '')
         return User.objects.get(id=val)
 
+    def list(self, request, *args, **kwargs):
+        if not is_staff_request(request):
+            return Response(
+                {"detail": "Authentication required. Access to system staff user directory is restricted to authorized staff administrators."},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        return super().list(request, *args, **kwargs)
+
     def create(self, request, *args, **kwargs):
+        if not is_staff_request(request):
+            return Response(
+                {"detail": "Authentication required. Only authorized staff administrators can create system user accounts."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         import time
         from django.contrib.auth.models import User
         from .models import UserProfile, Role
@@ -524,6 +570,11 @@ class SystemUserViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     def destroy(self, request, *args, **kwargs):
+        if not is_staff_request(request):
+            return Response(
+                {"detail": "Authentication required. Only authorized staff administrators can deactivate system user accounts."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         user = self.get_object()
         user.is_active = False
         user.save()

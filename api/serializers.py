@@ -368,6 +368,9 @@ class SystemUserSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
+        ret.pop('password', None)
+        ret.pop('password_hash', None)
+        ret.pop('user_password', None)
         role_name = 'Helpdesk Officer'
         desk_name = 'helpdesk'
 
