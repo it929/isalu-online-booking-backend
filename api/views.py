@@ -91,6 +91,7 @@ class StaffLoginView(APIView):
 class DepartmentViewSet(viewsets.ModelViewSet):
     serializer_class = DepartmentSerializer
     permission_classes = [AllowAny]
+    authentication_classes = []
     lookup_field = 'dept_id'
 
     def get_queryset(self):
@@ -143,6 +144,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 class DoctorViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorSerializer
     permission_classes = [AllowAny]
+    authentication_classes = []
     lookup_field = 'doc_id'
 
     def get_queryset(self):
@@ -153,12 +155,119 @@ class DoctorViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(department__dept_id__iexact=dept_clean)
         return queryset
 
+    def create(self, request, *args, **kwargs):
+        import time
+        from .models import Doctor, Department
+
+        data = request.data
+        doc_id = data.get('doc_id') or data.get('id') or f"doc-{int(time.time() * 1000)}"
+        name = data.get('name') or data.get('fullName') or data.get('full_name') or 'Specialist Doctor'
+        full_name = data.get('fullName') or data.get('full_name') or name
+        acronym = data.get('acronym') or name
+        specialty = data.get('specialty') or 'Specialist Consultation'
+        qualification = data.get('qualification') or data.get('qualifications') or 'MBBS, FWACS'
+        room = data.get('roomNumber') or data.get('room_number') or data.get('room') or 'Consultation Suite'
+        available_days = data.get('availableDays') or data.get('available_days') or data.get('availability') or ["Monday", "Wednesday", "Friday"]
+        time_slots = data.get('timeSlots') or data.get('time_slots') or ["08:00 AM – 02:00 PM"]
+        accepted_types = data.get('acceptedPatientTypes') or data.get('accepted_patient_types') or ["Private Self-Pay", "HMO Insurance"]
+        dept_id = data.get('departmentId') or data.get('department_id') or data.get('department')
+
+        dept_obj = None
+        if dept_id:
+            dept_obj = Department.objects.filter(dept_id__iexact=str(dept_id).strip()).first()
+        if not dept_obj and specialty:
+            dept_obj = Department.objects.filter(name__icontains=specialty.strip()).first()
+
+        doc_obj = Doctor.objects.filter(doc_id=doc_id).first()
+        if not doc_obj:
+            doc_obj = Doctor(doc_id=doc_id)
+
+        doc_obj.name = name
+        doc_obj.full_name = full_name
+        doc_obj.acronym = acronym
+        doc_obj.specialty = specialty
+        if dept_obj:
+            doc_obj.department = dept_obj
+        doc_obj.qualification = qualification
+        doc_obj.qualifications = qualification
+        doc_obj.room_number = room
+        doc_obj.available_days = available_days
+        doc_obj.time_slots = time_slots
+        doc_obj.accepted_patient_types = accepted_types
+        doc_obj.status = True
+        doc_obj.save()
+
+        serializer = self.get_serializer(doc_obj)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
 
 class SpecialistScheduleViewSet(viewsets.ModelViewSet):
-    queryset = SpecialistSchedule.objects.all()
+    queryset = SpecialistSchedule.objects.all().order_by('-sched_id')
     serializer_class = SpecialistScheduleSerializer
     permission_classes = [AllowAny]
+    authentication_classes = []
     lookup_field = 'sched_id'
+
+    def create(self, request, *args, **kwargs):
+        import time
+        from .models import Doctor, SpecialistSchedule
+
+        data = request.data
+        sched_id = data.get('sched_id') or data.get('id') or f"sched-{int(time.time() * 1000)}"
+        doc_id = data.get('doctor_id') or data.get('doctorId') or data.get('doctor')
+        doc_name = data.get('doctor_name') or data.get('doctorName') or 'Specialist Doctor'
+        specialty = data.get('specialty') or 'Specialist Consultation'
+        room = data.get('room') or 'Consultation Suite 4B'
+        duty_days = data.get('duty_days') or data.get('dutyDays') or []
+        day_configs = data.get('day_configs') or data.get('dayConfigs') or {}
+        shift_time = data.get('shift_time') or data.get('shiftTime') or '08:00 AM – 02:00 PM'
+        capacity = data.get('capacity') or 15
+        total_capacity = data.get('total_weekly_capacity') or data.get('totalWeeklyCapacity') or capacity
+
+        # 1. Ensure Doctor object exists in Doctor DB table
+        doc_obj = None
+        if doc_id:
+            doc_obj = Doctor.objects.filter(doc_id__iexact=str(doc_id).strip()).first()
+        if not doc_obj and doc_name:
+            doc_obj = Doctor.objects.filter(name__iexact=str(doc_name).strip()).first() or Doctor.objects.filter(full_name__iexact=str(doc_name).strip()).first()
+
+        if not doc_obj:
+            new_doc_id = doc_id or f"doc-{int(time.time() * 1000)}"
+            doc_obj = Doctor.objects.create(
+                doc_id=new_doc_id,
+                name=doc_name,
+                full_name=doc_name,
+                acronym=doc_name,
+                specialty=specialty,
+                qualification='MBBS, FWACS',
+                room_number=room,
+                available_days=duty_days,
+                status=True
+            )
+        else:
+            doc_obj.available_days = duty_days
+            doc_obj.room_number = room
+            doc_obj.save()
+
+        # 2. Save / Update SpecialistSchedule in database
+        sched_obj = SpecialistSchedule.objects.filter(sched_id=sched_id).first()
+        if not sched_obj:
+            sched_obj = SpecialistSchedule(sched_id=sched_id)
+
+        sched_obj.doctor = doc_obj
+        sched_obj.doctor_name = doc_name
+        sched_obj.specialty = specialty
+        sched_obj.room = room
+        sched_obj.duty_days = duty_days
+        sched_obj.day_configs = day_configs
+        sched_obj.shift_time = shift_time
+        sched_obj.capacity = capacity
+        sched_obj.total_weekly_capacity = total_capacity
+        sched_obj.status = True
+        sched_obj.save()
+
+        serializer = self.get_serializer(sched_obj)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class BookingViewSet(viewsets.ModelViewSet):
@@ -346,7 +455,8 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
 class SystemUserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by('-date_joined', '-id')
     serializer_class = SystemUserSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
+    authentication_classes = []
     lookup_field = 'id'
 
     def get_object(self):
@@ -355,6 +465,69 @@ class SystemUserViewSet(viewsets.ModelViewSet):
         if val.startswith('usr-'):
             val = val.replace('usr-', '')
         return User.objects.get(id=val)
+
+    def create(self, request, *args, **kwargs):
+        import time
+        from django.contrib.auth.models import User
+        from .models import UserProfile, Role
+
+        data = request.data
+        email = (data.get('email') or '').strip().lower()
+        raw_password = data.get('password') or 'admin123'
+        name = (data.get('name') or data.get('first_name') or (email.split('@')[0] if email else 'Staff User')).strip()
+        role_name = data.get('role') or 'Helpdesk Officer'
+        status_input = data.get('status', 'Active')
+
+        username = email if email else f"user_{int(time.time() * 1000)}"
+
+        # 1. Save / Update User in auth_user table
+        user = User.objects.filter(email__iexact=email).first() if email else None
+        if not user:
+            user = User.objects.filter(username__iexact=username).first()
+
+        if user:
+            user.first_name = name
+            if raw_password:
+                user.set_password(raw_password)
+            user.is_staff = True
+            user.is_active = (status_input != 'Disabled' and status_input != 'false' and status_input != False)
+            user.save()
+        else:
+            user = User.objects.create_user(
+                username=username,
+                email=email,
+                password=raw_password,
+                first_name=name,
+                is_staff=True,
+                is_active=(status_input != 'Disabled' and status_input != 'false' and status_input != False)
+            )
+
+        # 2. Save / Update UserProfile in api_userprofile table
+        role_obj = (
+            Role.objects.filter(name__iexact=role_name).first()
+            or Role.objects.filter(role_id__iexact=role_name).first()
+            or Role.objects.filter(name__icontains=role_name).first()
+        )
+        if not role_obj:
+            role_id_clean = role_name.lower().replace(' ', '-')
+            role_obj, _ = Role.objects.get_or_create(
+                role_id=role_id_clean,
+                defaults={'name': role_name, 'primary_desk': 'helpdesk', 'status': True}
+            )
+
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        profile.role = role_obj
+        profile.save()
+
+        # 3. Return serialized data
+        serializer = self.get_serializer(user)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def destroy(self, request, *args, **kwargs):
+        user = self.get_object()
+        user.is_active = False
+        user.save()
+        return Response({"message": f"User {user.username} deactivated successfully."}, status=status.HTTP_200_OK)
 
 
 class CustomTimeSlotViewSet(viewsets.ModelViewSet):

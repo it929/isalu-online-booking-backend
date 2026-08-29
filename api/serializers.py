@@ -67,13 +67,17 @@ class DoctorSerializer(serializers.ModelSerializer):
         mapping = {
             'fullName': 'full_name',
             'availableDays': 'available_days',
+            'availability': 'available_days',
             'timeSlots': 'time_slots',
             'roomNumber': 'room_number',
+            'room': 'room_number',
             'acceptedPatientTypes': 'accepted_patient_types',
+            'accepted_patient_types': 'accepted_patient_types',
         }
         for camel, snake in mapping.items():
             if camel in data_copy:
-                data_copy[snake] = data_copy[camel]
+                if snake not in data_copy or not data_copy[snake]:
+                    data_copy[snake] = data_copy[camel]
                 data_copy.pop(camel, None)
 
         dept_val = data_copy.get('department_id') or data_copy.get('departmentId') or data_copy.get('department')
@@ -95,6 +99,7 @@ class DoctorSerializer(serializers.ModelSerializer):
         ret['id'] = instance.doc_id
         ret['doc_id'] = instance.doc_id
         ret['fullName'] = instance.full_name or instance.name
+        ret['full_name'] = instance.full_name or instance.name
         ret['departmentId'] = instance.department.dept_id if instance.department else (getattr(instance, 'department_id', None) or '')
         ret['department_id'] = ret['departmentId']
         if instance.department:
@@ -108,12 +113,15 @@ class DoctorSerializer(serializers.ModelSerializer):
         else:
             ret['department'] = None
         ret['availableDays'] = instance.available_days or []
+        ret['availability'] = instance.available_days or []
         ret['timeSlots'] = instance.time_slots or []
         ret['roomNumber'] = instance.room_number or ''
+        ret['room'] = instance.room_number or ''
         types = instance.accepted_patient_types
         if not types or len(types) == 0:
             types = ["Private Self-Pay", "HMO Insurance"]
         ret['acceptedPatientTypes'] = types
+        ret['accepted_patient_types'] = types
         ret['status'] = instance.status
         return ret
 
@@ -163,6 +171,9 @@ class SpecialistScheduleSerializer(serializers.ModelSerializer):
             else:
                 data_copy['doctor'] = None
 
+        if 'status' in data_copy:
+            data_copy['status'] = parse_bool_status(data_copy['status'])
+
         return super().to_internal_value(data_copy)
 
     def to_representation(self, instance):
@@ -170,13 +181,20 @@ class SpecialistScheduleSerializer(serializers.ModelSerializer):
         doc_id_val = instance.doctor.doc_id if instance.doctor else (getattr(instance, 'doctor_id', None) or '')
         doc_name_val = instance.doctor_name or (instance.doctor.full_name if instance.doctor else '')
         ret['id'] = instance.sched_id
+        ret['sched_id'] = instance.sched_id
         ret['doctorId'] = doc_id_val
         ret['doctor_id'] = doc_id_val
         ret['doctorName'] = doc_name_val
+        ret['doctor_name'] = doc_name_val
         ret['dutyDays'] = instance.duty_days or []
+        ret['duty_days'] = instance.duty_days or []
         ret['dayConfigs'] = instance.day_configs or {}
+        ret['day_configs'] = instance.day_configs or {}
         ret['shiftTime'] = instance.shift_time
+        ret['shift_time'] = instance.shift_time
         ret['totalWeeklyCapacity'] = instance.total_weekly_capacity or instance.capacity
+        ret['total_weekly_capacity'] = instance.total_weekly_capacity or instance.capacity
+        ret['status'] = instance.status
         return ret
 
 
