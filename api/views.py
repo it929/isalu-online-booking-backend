@@ -112,8 +112,7 @@ class StaffLoginView(APIView):
 
 class DepartmentViewSet(viewsets.ModelViewSet):
     serializer_class = DepartmentSerializer
-    permission_classes = [AllowAny]
-    authentication_classes = []
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'dept_id'
 
     def get_queryset(self):
@@ -165,8 +164,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
 class DoctorViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorSerializer
-    permission_classes = [AllowAny]
-    authentication_classes = []
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'doc_id'
 
     def get_queryset(self):
@@ -226,8 +224,7 @@ class DoctorViewSet(viewsets.ModelViewSet):
 class SpecialistScheduleViewSet(viewsets.ModelViewSet):
     queryset = SpecialistSchedule.objects.all().order_by('-sched_id')
     serializer_class = SpecialistScheduleSerializer
-    permission_classes = [AllowAny]
-    authentication_classes = []
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'sched_id'
 
     def create(self, request, *args, **kwargs):
@@ -294,8 +291,13 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
 
 class BookingViewSet(viewsets.ModelViewSet):
     serializer_class = BookingSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'ref_code'
+
+    def get_permissions(self):
+        if self.action in ['create', 'retrieve']:
+            return [AllowAny()]
+        return [IsAuthenticatedOrReadOnly()]
 
     def get_queryset(self):
         include_disabled = self.request.query_params.get('include_disabled') == 'true'
@@ -461,7 +463,7 @@ class BookingViewSet(viewsets.ModelViewSet):
 class HmoCompanyViewSet(viewsets.ModelViewSet):
     queryset = HmoCompany.objects.all()
     serializer_class = HmoCompanySerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'hmo_id'
 
     def create(self, request, *args, **kwargs):
@@ -487,8 +489,7 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
 class SystemUserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().order_by('-date_joined', '-id')
     serializer_class = SystemUserSerializer
-    permission_classes = [AllowAny]
-    authentication_classes = []
+    permission_classes = [IsAuthenticated]
     lookup_field = 'id'
 
     def get_object(self):
@@ -584,14 +585,14 @@ class SystemUserViewSet(viewsets.ModelViewSet):
 class CustomTimeSlotViewSet(viewsets.ModelViewSet):
     queryset = CustomTimeSlot.objects.all()
     serializer_class = CustomTimeSlotSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'slot_id'
 
 
 class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'role_id'
 
     def get_object(self):
