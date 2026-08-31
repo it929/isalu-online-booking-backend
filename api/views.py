@@ -464,7 +464,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
 
-        queryset = Department.objects.all()
+        queryset = (Department.objects.all().order_by("name"))
 
         if self.action in (
             "retrieve",
@@ -580,25 +580,31 @@ class DoctorViewSet(viewsets.ModelViewSet):
     lookup_field = 'doc_id'
 
     def get_queryset(self):
-        queryset = Doctor.objects.all().select_related('department')
 
-        dept_param = (
-            self.request.query_params.get('department')
-            or self.request.query_params.get('department_id')
-            or self.request.query_params.get('dept_id')
+        queryset = (
+            Doctor.objects
+            .all()
+            .select_related("department")
+            .prefetch_related("schedules")
         )
 
-        if dept_param and str(dept_param).strip().lower() != 'all':
+        dept_param = (
+            self.request.query_params.get("department")
+            or self.request.query_params.get("department_id")
+            or self.request.query_params.get("dept_id")
+        )
+
+        if dept_param and str(dept_param).strip().lower() != "all":
+
             dept_clean = str(dept_param).strip().lower()
 
             queryset = queryset.filter(
                 department__dept_id__iexact=dept_clean
             )
 
-        search = self.request.query_params.get('search')
+        search = self.request.query_params.get("search")
 
         if search:
-            from django.db.models import Q
 
             search = str(search).strip()
 
@@ -610,15 +616,16 @@ class DoctorViewSet(viewsets.ModelViewSet):
                 | Q(specialty__icontains=search)
             )
 
-        status_param = self.request.query_params.get('status')
+        status_param = self.request.query_params.get("status")
 
         if status_param is not None:
+
             value = str(status_param).lower().strip()
 
-            if value in ['active', 'true', '1']:
+            if value in ["active", "true", "1"]:
                 queryset = queryset.filter(status=True)
 
-            elif value in ['inactive', 'disabled', 'false', '0']:
+            elif value in ["inactive", "disabled", "false", "0"]:
                 queryset = queryset.filter(status=False)
 
         return queryset
@@ -2225,7 +2232,11 @@ class BookingViewSet(viewsets.ModelViewSet):
 
 class HmoCompanyViewSet(viewsets.ModelViewSet):
 
-    queryset = HmoCompany.objects.all()
+    queryset = (
+        HmoCompany.objects
+        .all()
+        .order_by("name")
+    )
     serializer_class = HmoCompanySerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "hmo_id"

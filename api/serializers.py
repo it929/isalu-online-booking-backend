@@ -3,6 +3,13 @@ from api.models import AppSetting
 from rest_framework import serializers
 from django.contrib.auth.models import User
 
+from django.db import transaction
+from django.utils import timezone
+import datetime
+import time
+
+from django.db import transaction
+
 import time
 
 from .models import (
@@ -668,13 +675,75 @@ class SpecialistScheduleSerializer(
 
 class BookingSerializer(serializers.ModelSerializer):
 
+    # --------------------------------------------------------
+    # REF CODE
+    # --------------------------------------------------------
+    #
+    # IMPORTANT:
+    #
+    # ref_code is BACKEND GENERATED.
+    #
+    # The frontend MUST NOT be required to send:
+    #
+    #     ref_code
+    #     refCode
+    #
+    # DRF will never ask the frontend for ref_code because
+    # this field is read_only.
+    #
+    # The value is generated inside create().
+    #
+    # Example:
+    #
+    #     ISALU-7A91C2D8F4
+    #
+    # --------------------------------------------------------
+
+    ref_code = serializers.CharField(
+        read_only=True,
+        required=False
+    )
+
     class Meta:
         model = Booking
         fields = "__all__"
+        read_only_fields = [
+            "ref_code",
+            "created_at",
+        ]
 
-    # --------------------------------------------------------
-    # INPUT
-    # --------------------------------------------------------
+    # ========================================================
+    # GENERATE UNIQUE BOOKING REFERENCE
+    # ========================================================
+
+    def _generate_ref_code(self):
+        """
+        Generate a unique server-side booking reference.
+
+        Example:
+            ISALU-7A91C2D8F4
+
+        The database is checked before returning the value.
+        """
+
+        import uuid
+
+        while True:
+
+            ref_code = (
+                "ISALU-"
+                f"{uuid.uuid4().hex[:10].upper()}"
+            )
+
+            if not Booking.objects.filter(
+                ref_code=ref_code
+            ).exists():
+
+                return ref_code
+
+    # ========================================================
+    # INPUT NORMALIZATION
+    # ========================================================
 
     def to_internal_value(self, data):
 
@@ -684,26 +753,52 @@ class BookingSerializer(serializers.ModelSerializer):
             else dict(data)
         )
 
+        # ----------------------------------------------------
+        # IMPORTANT
+        # ----------------------------------------------------
+        #
+        # DO NOT generate ref_code here.
+        #
+        # ref_code is read_only, therefore DRF does not require
+        # it during validation.
+        #
+        # It will be generated safely inside create().
+        #
+        # ----------------------------------------------------
+
+        # ====================================================
+        # CAMEL CASE → SNAKE CASE
+        # ====================================================
+
         mapping = {
-            "refCode": "ref_code",
+
             "doctorId": "doctor_id",
             "doctorName": "doctor_name",
             "doctorSpecialty": "doctor_specialty",
+
             "patientName": "patient_name",
             "patientPhone": "patient_phone",
             "patientEmail": "patient_email",
+
             "paymentType": "payment_type",
+
             "hmoName": "hmo_name",
             "hmoPolicyCode": "hmo_policy_code",
             "hmoAuthCode": "hmo_auth_code",
+
             "referralDocName": "referral_doc_name",
             "referralDocData": "referral_doc_data",
             "referralDocText": "referral_doc_text",
+
             "hmoStatus": "hmo_status",
+
             "paymentStatus": "payment_status",
             "paymentMethod": "payment_method",
+
             "invoiceRef": "invoice_ref",
+
             "isActive": "is_active",
+
             "deleteReason": "delete_reason",
         }
 
@@ -718,44 +813,148 @@ class BookingSerializer(serializers.ModelSerializer):
                 ):
                     data_copy[snake] = data_copy[camel]
 
-        return super().to_internal_value(data_copy)
+        # ----------------------------------------------------
+        # REMOVE FRONTEND REF CODE
+        # ----------------------------------------------------
+        #
+        # Even if frontend sends:
+        #
+        #     ref_code
+        #     refCode
+        #
+        # the backend owns this value.
+        #
+        # ----------------------------------------------------
 
-    # --------------------------------------------------------
+        data_copy.pop("ref_code", None)
+        data_copy.pop("refCode", None)
+
+        return super().to_internal_value(
+            data_copy
+        )
+
+    # ========================================================
     # OUTPUT
-    # --------------------------------------------------------
+    # ========================================================
 
     def to_representation(self, instance):
 
-        ret = super().to_representation(instance)
+        ret = super().to_representation(
+            instance
+        )
+
+        # ====================================================
+        # REFERENCE CODE
+        # ====================================================
 
         ret["refCode"] = instance.ref_code
+        ret["ref_code"] = instance.ref_code
+
+        # ====================================================
+        # DOCTOR
+        # ====================================================
+
         ret["doctorId"] = instance.doctor_id
-        ret["doctorName"] = instance.doctor_name
-        ret["doctorSpecialty"] = instance.doctor_specialty
 
-        ret["patientName"] = instance.patient_name
-        ret["patientPhone"] = instance.patient_phone
-        ret["patientEmail"] = instance.patient_email
+        ret["doctorName"] = (
+            instance.doctor_name
+        )
 
-        ret["paymentType"] = instance.payment_type
+        ret["doctorSpecialty"] = (
+            instance.doctor_specialty
+        )
 
-        ret["hmoName"] = instance.hmo_name
-        ret["hmoPolicyCode"] = instance.hmo_policy_code
-        ret["hmoAuthCode"] = instance.hmo_auth_code
+        # ====================================================
+        # PATIENT
+        # ====================================================
 
-        ret["referralDocName"] = instance.referral_doc_name
-        ret["referralDocData"] = instance.referral_doc_data
-        ret["referralDocText"] = instance.referral_doc_text
+        ret["patientName"] = (
+            instance.patient_name
+        )
 
-        ret["hmoStatus"] = instance.hmo_status
+        ret["patientPhone"] = (
+            instance.patient_phone
+        )
 
-        ret["paymentStatus"] = instance.payment_status
-        ret["paymentMethod"] = instance.payment_method
+        ret["patientEmail"] = (
+            instance.patient_email
+        )
 
-        ret["invoiceRef"] = instance.invoice_ref
+        # ====================================================
+        # PAYMENT
+        # ====================================================
 
-        ret["isActive"] = instance.is_active
-        ret["deleteReason"] = instance.delete_reason
+        ret["paymentType"] = (
+            instance.payment_type
+        )
+
+        ret["paymentStatus"] = (
+            instance.payment_status
+        )
+
+        ret["paymentMethod"] = (
+            instance.payment_method
+        )
+
+        # ====================================================
+        # HMO
+        # ====================================================
+
+        ret["hmoName"] = (
+            instance.hmo_name
+        )
+
+        ret["hmoPolicyCode"] = (
+            instance.hmo_policy_code
+        )
+
+        ret["hmoAuthCode"] = (
+            instance.hmo_auth_code
+        )
+
+        ret["hmoStatus"] = (
+            instance.hmo_status
+        )
+
+        # ====================================================
+        # REFERRAL DOCUMENT
+        # ====================================================
+
+        ret["referralDocName"] = (
+            instance.referral_doc_name
+        )
+
+        ret["referralDocData"] = (
+            instance.referral_doc_data
+        )
+
+        ret["referralDocText"] = (
+            instance.referral_doc_text
+        )
+
+        # ====================================================
+        # INVOICE
+        # ====================================================
+
+        ret["invoiceRef"] = (
+            instance.invoice_ref
+        )
+
+        # ====================================================
+        # STATUS
+        # ====================================================
+
+        ret["isActive"] = (
+            instance.is_active
+        )
+
+        ret["deleteReason"] = (
+            instance.delete_reason
+        )
+
+        # ====================================================
+        # CREATED
+        # ====================================================
 
         ret["createdAt"] = (
             instance.created_at.isoformat()
@@ -765,16 +964,39 @@ class BookingSerializer(serializers.ModelSerializer):
 
         return ret
 
-    # --------------------------------------------------------
+    # ========================================================
     # VALIDATION
-    # --------------------------------------------------------
-
+    # ========================================================
     def validate(self, data):
+        """
+        Validate a booking.
+
+        Rules:
+        - Doctor must exist.
+        - Doctor must be active.
+        - Doctor schedule must be active.
+        - Doctor must be on duty on the selected date.
+        - Daily capacity is enforced per doctor.
+        - Multiple patients may book the same time.
+        - Existing booking being updated is excluded from capacity count.
+        - Same-day bookings must be at least 30 minutes ahead.
+        """
+
+        import datetime
+        import re
 
         data = super().validate(data)
 
+        # ========================================================
+        # DATE / TIME
+        # ========================================================
+
         date_str = data.get("date")
         time_str = data.get("time")
+
+        # ========================================================
+        # DOCTOR
+        # ========================================================
 
         doc_id = (
             data.get("doctor_id")
@@ -787,11 +1009,11 @@ class BookingSerializer(serializers.ModelSerializer):
             or data.get("doctorName")
         )
 
-        # ====================================================
-        # FIND DOCTOR
-        # ====================================================
-
         doc_obj = None
+
+        # ========================================================
+        # FIND DOCTOR BY ID
+        # ========================================================
 
         if doc_id:
 
@@ -802,18 +1024,18 @@ class BookingSerializer(serializers.ModelSerializer):
                 doc_obj = (
                     Doctor.objects
                     .filter(
-                        doc_id__iexact=str(
-                            doc_id
-                        ).strip()
+                        doc_id__iexact=str(doc_id).strip()
                     )
                     .first()
                 )
 
+        # ========================================================
+        # FIND DOCTOR BY NAME
+        # ========================================================
+
         if not doc_obj and doc_name:
 
-            clean_name = str(
-                doc_name
-            ).strip()
+            clean_name = str(doc_name).strip()
 
             doc_obj = (
                 Doctor.objects
@@ -821,190 +1043,48 @@ class BookingSerializer(serializers.ModelSerializer):
                     name__iexact=clean_name
                 )
                 .first()
-                or Doctor.objects.filter(
+                or
+                Doctor.objects
+                .filter(
                     full_name__iexact=clean_name
-                ).first()
+                )
+                .first()
             )
 
-        # ====================================================
-        # DOCTOR STATUS / SCHEDULE VALIDATION
-        # ====================================================
+        # ========================================================
+        # DOCTOR NOT FOUND
+        # ========================================================
 
-        if doc_obj:
+        if not doc_obj:
 
-            if not doc_obj.status:
+            raise serializers.ValidationError({
+                "error": "Selected doctor could not be found."
+            })
 
-                raise serializers.ValidationError({
-                    "error": (
-                        "Doctor Profile Inactive: "
-                        f"{doc_obj.full_name or doc_obj.name} "
-                        "is currently inactive or unavailable "
-                        "for appointments."
-                    )
-                })
+        # ========================================================
+        # DOCTOR STATUS
+        # ========================================================
 
-            sched_obj = (
-                doc_obj.schedules.first()
-            )
+        if not doc_obj.status:
 
-            if sched_obj and not sched_obj.status:
-
-                raise serializers.ValidationError({
-                    "error": (
-                        "Schedule Suspended: Clinic schedule "
-                        f"for {doc_obj.full_name or doc_obj.name} "
-                        "is currently suspended or on leave."
-                    )
-                })
-
-            # =================================================
-            # DAILY CAPACITY
-            # =================================================
-
-            if date_str:
-
-                import datetime
-
-                dt_obj = None
-
-                try:
-                    dt_obj = datetime.datetime.strptime(
-                        str(date_str),
-                        "%Y-%m-%d"
-                    )
-
-                except Exception:
-                    pass
-
-                day_short = (
-                    dt_obj.strftime("%a")
-                    if dt_obj
-                    else ""
+            raise serializers.ValidationError({
+                "error": (
+                    "Doctor Profile Inactive: "
+                    f"{doc_obj.full_name or doc_obj.name} "
+                    "is currently inactive or unavailable "
+                    "for appointments."
                 )
+            })
 
-                max_capacity = 15
+        # ========================================================
+        # PARSE DATE
+        # ========================================================
 
-                if sched_obj:
-
-                    day_cfgs = (
-                        sched_obj.day_configs
-                        or {}
-                    )
-
-                    if (
-                        day_short in day_cfgs
-                        and isinstance(
-                            day_cfgs[day_short],
-                            dict
-                        )
-                    ):
-
-                        max_capacity = int(
-                            day_cfgs[
-                                day_short
-                            ].get(
-                                "capacity"
-                            )
-                            or sched_obj.capacity
-                            or 15
-                        )
-
-                    elif sched_obj.capacity:
-
-                        max_capacity = int(
-                            sched_obj.capacity
-                        )
-
-                # ---------------------------------------------
-                # DUTY DAYS
-                # ---------------------------------------------
-
-                if sched_obj:
-
-                    duty_days = (
-                        sched_obj.duty_days
-                        or []
-                    )
-
-                    day_name = (
-                        dt_obj.strftime("%A")
-                        if dt_obj
-                        else ""
-                    )
-
-                    day_short = (
-                        dt_obj.strftime("%a")
-                        if dt_obj
-                        else ""
-                    )
-
-                    tokens = [
-                        str(x).strip().lower()
-                        for x in duty_days
-                    ]
-
-                    if tokens:
-
-                        is_on_duty = any(
-                            t == day_name.lower()
-                            or t == day_short.lower()
-                            or day_name.lower().startswith(t)
-                            for t in tokens
-                        )
-
-                        if not is_on_duty:
-
-                            raise serializers.ValidationError({
-                                "error": (
-                                    "Doctor schedule unavailable: "
-                                    f"{doc_obj.full_name or doc_obj.name} "
-                                    f"is not on duty on {day_name}."
-                                )
-                            })
-
-                # ---------------------------------------------
-                # EXISTING BOOKINGS
-                # ---------------------------------------------
-
-                existing_count = (
-                    Booking.objects
-                    .filter(
-                        doctor_id=doc_obj.doc_id,
-                        date=date_str,
-                        is_active=True
-                    )
-                    .exclude(
-                        status="Disabled"
-                    )
-                    .count()
-                )
-
-                if existing_count >= max_capacity:
-
-                    raise serializers.ValidationError({
-                        "error": (
-                            "Daily Shift Capacity Full: "
-                            f"{doc_obj.full_name or doc_obj.name} "
-                            "has reached maximum daily patient "
-                            f"capacity ({max_capacity} visits) "
-                            f"for {date_str}. Please select "
-                            "another date."
-                        )
-                    })
-
-        # ====================================================
-        # DATE VALIDATION
-        # ====================================================
+        parsed_date = None
 
         if date_str:
 
-            import datetime
-
-            parsed_date = None
-
-            raw_date = str(
-                date_str
-            ).strip()
+            raw_date = str(date_str).strip()
 
             for fmt in (
                 "%Y-%m-%d",
@@ -1029,73 +1109,229 @@ class BookingSerializer(serializers.ModelSerializer):
                 except ValueError:
                     continue
 
-            if not parsed_date:
+        if date_str and not parsed_date:
+
+            raise serializers.ValidationError({
+                "error": (
+                    "Invalid appointment date. "
+                    "Please use a valid calendar date."
+                )
+            })
+
+        # ========================================================
+        # NORMALIZE DATE
+        # ========================================================
+
+        if parsed_date:
+
+            data["date"] = parsed_date.isoformat()
+            date_str = data["date"]
+
+        # ========================================================
+        # DOCTOR SCHEDULE
+        # ========================================================
+
+        sched_obj = (
+            doc_obj.schedules
+            .filter(status=True)
+            .first()
+        )
+        
+
+        # ========================================================
+        # SCHEDULE STATUS
+        # ========================================================
+
+        if sched_obj:
+
+            if not sched_obj.status:
 
                 raise serializers.ValidationError({
                     "error": (
-                        "Invalid appointment date. "
-                        "Please use a valid calendar date."
+                        "Schedule Suspended: Clinic schedule "
+                        f"for {doc_obj.full_name or doc_obj.name} "
+                        "is currently suspended or on leave."
                     )
                 })
 
-            data["date"] = (
-                parsed_date.isoformat()
-            )
+        # ========================================================
+        # DUTY DAY
+        # ========================================================
 
-            date_str = data["date"]
+        if sched_obj and parsed_date:
 
-        # ====================================================
-        # DUPLICATE APPOINTMENT
-        # ====================================================
+            duty_days = sched_obj.duty_days or []
 
-        if doc_obj and date_str and time_str:
+            if duty_days:
 
-            duplicate = (
+                day_name = parsed_date.strftime("%A")
+                day_short = parsed_date.strftime("%a")
+
+                tokens = [
+                    str(x).strip().lower()
+                    for x in duty_days
+                    if str(x).strip()
+                ]
+
+                is_on_duty = any(
+                    token == day_name.lower()
+                    or token == day_short.lower()
+                    or day_name.lower().startswith(token)
+                    for token in tokens
+                )
+
+                if not is_on_duty:
+
+                    raise serializers.ValidationError({
+                        "error": (
+                            "Doctor schedule unavailable: "
+                            f"{doc_obj.full_name or doc_obj.name} "
+                            f"is not on duty on {day_name}."
+                        )
+                    })
+
+        # ========================================================
+        # DAILY CAPACITY
+        #
+        # IMPORTANT:
+        #
+        # Capacity is PER DOCTOR PER DAY.
+        #
+        # It is NOT per appointment time.
+        #
+        # Therefore:
+        #
+        # 15 capacity = maximum 15 bookings for that doctor
+        # on that date, regardless of the selected time.
+        # ========================================================
+
+        if sched_obj and parsed_date:
+
+            day_short = parsed_date.strftime("%a")
+
+            day_cfgs = sched_obj.day_configs or {}
+
+            max_capacity = sched_obj.capacity or 15
+
+            # ----------------------------------------------------
+            # DAY-SPECIFIC CAPACITY
+            # ----------------------------------------------------
+
+            day_config = day_cfgs.get(day_short)
+
+            if isinstance(day_config, dict):
+
+                configured_capacity = (
+                    day_config.get("capacity")
+                )
+
+                if configured_capacity not in (
+                    None,
+                    "",
+                ):
+
+                    try:
+
+                        max_capacity = int(
+                            configured_capacity
+                        )
+
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+
+                        max_capacity = (
+                            sched_obj.capacity
+                            or 15
+                        )
+
+            # ----------------------------------------------------
+            # SAFETY
+            # ----------------------------------------------------
+
+            try:
+
+                max_capacity = int(
+                    max_capacity
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                max_capacity = 15
+
+            if max_capacity < 0:
+                max_capacity = 0
+
+            # ====================================================
+            # COUNT EXISTING DAILY BOOKINGS
+            # ====================================================
+
+            bookings_qs = (
                 Booking.objects
                 .filter(
                     doctor_id=doc_obj.doc_id,
                     date=date_str,
-                    time=time_str,
-                    is_active=True
+                    is_active=True,
                 )
                 .exclude(
-                    status="Disabled"
+                    status__iexact="Disabled"
                 )
             )
 
+            # ----------------------------------------------------
+            # WHEN EDITING A BOOKING
+            #
+            # Do not count the booking being edited.
+            # ----------------------------------------------------
+
             if self.instance:
 
-                duplicate = duplicate.exclude(
-                    ref_code=self.instance.ref_code
+                bookings_qs = (
+                    bookings_qs
+                    .exclude(
+                        ref_code=self.instance.ref_code
+                    )
                 )
 
-            if duplicate.exists():
+            existing_count = bookings_qs.count()
+
+            # ====================================================
+            # CAPACITY CHECK
+            # ====================================================
+
+            if existing_count >= max_capacity:
 
                 raise serializers.ValidationError({
                     "error": (
-                        "The selected doctor already has "
-                        "an appointment at this date and "
-                        "time. Please choose another time."
-                    )
+                        "Daily Shift Capacity Full: "
+                        f"{doc_obj.full_name or doc_obj.name} "
+                        "has reached the maximum daily patient "
+                        f"capacity of {max_capacity} visits "
+                        f"for {date_str}. Please select another date."
+                    ),
+                    "capacity": max_capacity,
+                    "booked": existing_count,
+                    "remaining": 0,
+                    "doctor_id": doc_obj.doc_id,
+                    "date": date_str,
                 })
 
-        # ====================================================
+        # ========================================================
         # SAME-DAY 30-MINUTE CUTOFF
-        # ====================================================
+        # ========================================================
 
         if date_str and time_str:
-
-            import datetime
-            import re
-
-            from django.utils import timezone
 
             now_local = timezone.localtime(
                 timezone.now()
             )
 
-            today_str = (
-                now_local.strftime("%Y-%m-%d")
+            today_str = now_local.strftime(
+                "%Y-%m-%d"
             )
 
             if date_str == today_str:
@@ -1118,6 +1354,10 @@ class BookingSerializer(serializers.ModelSerializer):
 
                     ampm = match.group(3)
 
+                    # ------------------------------------------------
+                    # CONVERT 12-HOUR TIME TO 24-HOUR
+                    # ------------------------------------------------
+
                     if ampm:
 
                         ampm = ampm.upper()
@@ -1126,15 +1366,17 @@ class BookingSerializer(serializers.ModelSerializer):
                             ampm == "PM"
                             and hour < 12
                         ):
+
                             hour += 12
 
                         elif (
                             ampm == "AM"
                             and hour == 12
                         ):
+
                             hour = 0
 
-                    clinic_start = (
+                    appointment_time = (
                         now_local.replace(
                             hour=hour,
                             minute=minute,
@@ -1145,7 +1387,7 @@ class BookingSerializer(serializers.ModelSerializer):
 
                     time_diff_minutes = (
                         (
-                            clinic_start
+                            appointment_time
                             - now_local
                         ).total_seconds()
                         / 60.0
@@ -1158,36 +1400,234 @@ class BookingSerializer(serializers.ModelSerializer):
                                 "Same-Day Cutoff Restriction: "
                                 "Online bookings for today's "
                                 "clinic must be placed at least "
-                                "30 minutes prior to the clinic "
-                                "start time. Please select a "
-                                "future date or contact hospital "
-                                "reception."
+                                "30 minutes prior to the appointment "
+                                "time. Please select a future time "
+                                "or contact hospital reception."
                             )
                         })
 
-        return data
+        # ========================================================
+        # IMPORTANT
+        #
+        # THERE IS INTENTIONALLY NO DUPLICATE TIME CHECK.
+        #
+        # Multiple patients can have:
+        #
+        # Doctor A
+        # 2026-09-01
+        # 10:00 AM
+        #
+        # until the DAILY CAPACITY is reached.
+        # ========================================================
 
-    # --------------------------------------------------------
+        return data
+    
     # CREATE
-    # --------------------------------------------------------
+    # ========================================================
 
     def create(self, validated_data):
+        """
+        Create a booking safely.
 
-        if not validated_data.get(
-            "ref_code"
-        ):
+        The Doctor row is locked during the final capacity check
+        so simultaneous booking requests cannot exceed the
+        doctor's daily capacity.
+        """
 
-            import uuid
+        with transaction.atomic():
 
-            validated_data["ref_code"] = (
-                f"ISALU-"
-                f"{uuid.uuid4().hex[:10].upper()}"
+            doc_id = validated_data.get("doctor_id")
+
+            if not doc_id:
+                raise serializers.ValidationError({
+                    "error": "A doctor is required."
+                })
+
+            # ----------------------------------------------------
+            # LOCK DOCTOR
+            # ----------------------------------------------------
+
+            doctor = (
+                Doctor.objects
+                .select_for_update()
+                .filter(
+                    doc_id=doc_id
+                )
+                .first()
             )
 
-        return super().create(
-            validated_data
+            if not doctor:
+
+                raise serializers.ValidationError({
+                    "error": "Selected doctor could not be found."
+                })
+
+            # ----------------------------------------------------
+            # DATE
+            # ----------------------------------------------------
+
+            date_str = validated_data.get("date")
+
+            # ----------------------------------------------------
+            # GET SCHEDULE
+            # ----------------------------------------------------
+
+            schedule = (
+                doctor.schedules
+                .filter(status=True)
+                .first()
+            )
+
+            max_capacity = 15
+
+            if schedule:
+
+                max_capacity = (
+                    schedule.capacity
+                    or 15
+                )
+
+                if date_str:
+
+                    try:
+
+                        parsed_date = (
+                            datetime.datetime
+                            .strptime(
+                                str(date_str),
+                                "%Y-%m-%d"
+                            )
+                            .date()
+                        )
+
+                        day_short = (
+                            parsed_date
+                            .strftime("%a")
+                        )
+
+                        day_config = (
+                            schedule.day_configs or {}
+                        ).get(day_short)
+
+                        if isinstance(
+                            day_config,
+                            dict
+                        ):
+
+                            configured_capacity = (
+                                day_config.get(
+                                    "capacity"
+                                )
+                            )
+
+                            if configured_capacity not in (
+                                None,
+                                "",
+                            ):
+
+                                try:
+
+                                    max_capacity = int(
+                                        configured_capacity
+                                    )
+
+                                except (
+                                    TypeError,
+                                    ValueError,
+                                ):
+                                    pass
+
+                    except ValueError:
+                        pass
+
+            # ----------------------------------------------------
+            # FINAL DAILY CAPACITY CHECK
+            # ----------------------------------------------------
+
+            existing_count = (
+                Booking.objects
+                .filter(
+                    doctor_id=doctor.doc_id,
+                    date=date_str,
+                    is_active=True,
+                )
+                .exclude(
+                    status__iexact="Disabled"
+                )
+                .count()
+            )
+
+            if existing_count >= max_capacity:
+
+                raise serializers.ValidationError({
+                    "error": (
+                        "Daily Shift Capacity Full: "
+                        f"{doctor.full_name or doctor.name} "
+                        f"already has {existing_count} bookings "
+                        f"for {date_str}. Maximum capacity is "
+                        f"{max_capacity}."
+                    ),
+                    "capacity": max_capacity,
+                    "booked": existing_count,
+                    "remaining": 0,
+                })
+
+            # ----------------------------------------------------
+            # GENERATE REFERENCE
+            # ----------------------------------------------------
+
+            validated_data["ref_code"] = (
+                self._generate_ref_code()
+            )
+
+            # ----------------------------------------------------
+            # CREATE
+            # ----------------------------------------------------
+
+            return Booking.objects.create(
+                **validated_data
+            )
+    # UPDATE
+    # ========================================================
+
+    def update(
+        self,
+        instance,
+        validated_data
+    ):
+        """
+        Booking reference can NEVER be changed.
+
+        Whatever ref_code the booking originally received
+        remains permanently attached to that booking.
+        """
+
+        # ----------------------------------------------------
+        # REMOVE ANY ATTEMPT TO CHANGE REF CODE
+        # ----------------------------------------------------
+
+        validated_data.pop(
+            "ref_code",
+            None
         )
 
+        validated_data.pop(
+            "refCode",
+            None
+        )
+
+        # ----------------------------------------------------
+        # PRESERVE ORIGINAL REFERENCE
+        # ----------------------------------------------------
+
+        validated_data["ref_code"] = (
+            instance.ref_code
+        )
+
+        return super().update(
+            instance,
+            validated_data
+        )
 
 # ============================================================
 # HMO COMPANY SERIALIZER
