@@ -9,16 +9,16 @@ class DepartmentAdmin(admin.ModelAdmin):
 
 @admin.register(Doctor)
 class DoctorAdmin(admin.ModelAdmin):
-    list_display = ('doc_id', 'full_name', 'name', 'acronym', 'specialty', 'department', 'room_number')
+    list_display = ('doc_id', 'full_name', 'name', 'acronym', 'specialty', 'department')
     search_fields = ('doc_id', 'full_name', 'name', 'acronym', 'specialty')
     list_filter = ('specialty', 'department')
 
 
 @admin.register(SpecialistSchedule)
 class SpecialistScheduleAdmin(admin.ModelAdmin):
-    list_display = ('sched_id', 'doctor_name', 'specialty', 'room', 'shift_time', 'capacity', 'status')
-    search_fields = ('sched_id', 'doctor_name', 'specialty', 'room')
-    list_filter = ('status', 'specialty')
+    list_display = ('sched_id', 'doctor', 'room', 'shift_time', 'capacity', 'status')
+    search_fields = ('sched_id', 'doctor__full_name', 'doctor__name', 'room')
+    list_filter = ('status', 'doctor__department')
 
 
 @admin.register(Booking)

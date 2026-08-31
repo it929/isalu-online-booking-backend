@@ -26,16 +26,40 @@ class Doctor(models.Model):
     department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True, related_name='doctors')
     qualification = models.CharField(max_length=250, default='MBBS, FWACS')
     qualifications = models.CharField(max_length=250, default='MBBS, FWACS')
-    available_days = models.JSONField(default=list, blank=True)
-    time_slots = models.JSONField(default=list, blank=True)
     image = models.TextField(blank=True, default='')
     bio = models.TextField(blank=True, default='Senior Medical Consultant specializing in high-quality clinical care at Isalu Hospitals.')
-    room_number = models.CharField(max_length=100, default='Consultation Suite 4B')
     accepted_patient_types = models.JSONField(default=list, blank=True, help_text="Accepted patient categories e.g. ['Private Self-Pay', 'HMO Insurance']")
     status = models.BooleanField(default=True)
 
     class Meta:
         ordering = ['doc_id']
+
+    def save(self, *args, **kwargs):
+        if self.department:
+            self.specialty = self.department.name
+        super().save(*args, **kwargs)
+
+    @property
+    def available_days(self):
+        days = []
+        for s in self.schedules.all():
+            for d in (s.duty_days or []):
+                if d not in days:
+                    days.append(d)
+        return days
+
+    @property
+    def time_slots(self):
+        slots = []
+        for s in self.schedules.all():
+            if s.shift_time and s.shift_time not in slots:
+                slots.append(s.shift_time)
+        return slots
+
+    @property
+    def room_number(self):
+        sched = self.schedules.first()
+        return sched.room if (sched and sched.room) else "Consultation Suite 4B"
 
     def __str__(self):
         return f"{self.full_name or self.name} - {self.acronym or self.name}"
@@ -43,9 +67,9 @@ class Doctor(models.Model):
 
 class SpecialistSchedule(models.Model):
     sched_id = models.CharField(max_length=100, primary_key=True)
-    doctor = models.ForeignKey(Doctor, on_delete=models.SET_NULL, null=True, blank=True, related_name='schedules')
-    doctor_name = models.CharField(max_length=200)
-    specialty = models.CharField(max_length=200)
+    doctor = models.ForeignKey(Doctor, on_delete=models.CASCADE, null=True, blank=True, related_name='schedules')
+    doctor_name = models.CharField(max_length=200, blank=True, default='Unassigned Doctor')
+    specialty = models.CharField(max_length=200, blank=True, default='General Medicine')
     room = models.CharField(max_length=200, default='Consultation Suite')
     duty_days = models.JSONField(default=list)
     day_configs = models.JSONField(default=dict, blank=True)
@@ -56,6 +80,14 @@ class SpecialistSchedule(models.Model):
 
     class Meta:
         ordering = ['sched_id']
+
+    def save(self, *args, **kwargs):
+        if self.doctor:
+            if not self.doctor_name or self.doctor_name == 'Unassigned Doctor':
+                self.doctor_name = self.doctor.full_name or self.doctor.name
+            if not self.specialty or self.specialty == 'General Medicine':
+                self.specialty = self.doctor.department.name if self.doctor.department else (self.doctor.specialty or 'General Medicine')
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.doctor_name} ({self.shift_time})"

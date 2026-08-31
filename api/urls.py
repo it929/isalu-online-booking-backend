@@ -2,6 +2,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     StaffLoginView,
+    CustomTokenRefreshView,
+    HospitalEventStreamView,
     DepartmentViewSet,
     DoctorViewSet,
     SpecialistScheduleViewSet,
@@ -24,5 +26,7 @@ router.register(r'roles', RoleViewSet, basename='role')
 
 urlpatterns = [
     path('auth/staff-login/', StaffLoginView.as_view(), name='staff-login'),
+    path('auth/token-refresh/', CustomTokenRefreshView.as_view(), name='token-refresh'),
+    path('stream/events/', HospitalEventStreamView.as_view(), name='event-stream'),
     path('', include(router.urls)),
 ]

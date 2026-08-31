@@ -164,7 +164,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
 class DoctorViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'doc_id'
 
     def get_queryset(self):
@@ -174,6 +174,30 @@ class DoctorViewSet(viewsets.ModelViewSet):
             dept_clean = dept_param.strip().lower()
             queryset = queryset.filter(department__dept_id__iexact=dept_clean)
         return queryset
+
+    def sync_linked_schedules(self, doc_obj):
+        if not doc_obj:
+            return
+        from .models import SpecialistSchedule
+        schedules = SpecialistSchedule.objects.filter(doctor=doc_obj)
+        if not schedules.exists() and doc_obj.name:
+            schedules = SpecialistSchedule.objects.filter(doctor_name__icontains=doc_obj.name)
+        for sched in schedules:
+            sched.doctor = doc_obj
+            sched.doctor_name = f"{doc_obj.full_name or doc_obj.name} ({doc_obj.acronym or doc_obj.name})" if doc_obj.acronym else (doc_obj.full_name or doc_obj.name)
+            sched.specialty = doc_obj.specialty or sched.specialty
+            sched.room = doc_obj.room_number or sched.room
+            if doc_obj.available_days and len(doc_obj.available_days) > 0:
+                sched.duty_days = doc_obj.available_days
+            sched.save()
+
+    def perform_create(self, serializer):
+        doc_obj = serializer.save()
+        self.sync_linked_schedules(doc_obj)
+
+    def perform_update(self, serializer):
+        doc_obj = serializer.save()
+        self.sync_linked_schedules(doc_obj)
 
     def create(self, request, *args, **kwargs):
         import time
@@ -194,7 +218,11 @@ class DoctorViewSet(viewsets.ModelViewSet):
 
         dept_obj = None
         if dept_id:
-            dept_obj = Department.objects.filter(dept_id__iexact=str(dept_id).strip()).first()
+            if isinstance(dept_id, dict):
+                dept_str = str(dept_id.get('dept_id') or dept_id.get('id') or dept_id.get('name') or '').strip()
+            else:
+                dept_str = str(dept_id).strip()
+            dept_obj = Department.objects.filter(dept_id__iexact=dept_str).first()
         if not dept_obj and specialty:
             dept_obj = Department.objects.filter(name__icontains=specialty.strip()).first()
 
@@ -217,6 +245,8 @@ class DoctorViewSet(viewsets.ModelViewSet):
         doc_obj.status = True
         doc_obj.save()
 
+        self.sync_linked_schedules(doc_obj)
+
         serializer = self.get_serializer(doc_obj)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -224,8 +254,61 @@ class DoctorViewSet(viewsets.ModelViewSet):
 class SpecialistScheduleViewSet(viewsets.ModelViewSet):
     queryset = SpecialistSchedule.objects.all().order_by('-sched_id')
     serializer_class = SpecialistScheduleSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = 'sched_id'
+
+    def sync_doctor_from_schedule(self, sched_obj):
+        if not sched_obj:
+            return
+        doc_obj = sched_obj.doctor
+        if not doc_obj and getattr(sched_obj, 'doctor_name', None):
+            doc_obj = Doctor.objects.filter(name__iexact=str(sched_obj.doctor_name).strip()).first() or Doctor.objects.filter(full_name__iexact=str(sched_obj.doctor_name).strip()).first()
+        if doc_obj and not sched_obj.doctor:
+            sched_obj.doctor = doc_obj
+            sched_obj.save()
+
+    @action(detail=False, methods=['get'], url_path='capacity-analytics')
+    def capacity_analytics(self, request):
+        from .models import SpecialistSchedule, Booking
+        from django.db.models import Sum
+
+        schedules = SpecialistSchedule.objects.all()
+        total_weekly_cap = sum(s.total_weekly_capacity or (s.capacity * len(s.duty_days or [1])) for s in schedules)
+        active_sched_count = schedules.filter(status=True).count()
+        total_bookings = Booking.objects.filter(is_active=True).exclude(status="Disabled").count()
+
+        utilization_pct = round((total_bookings / max(1, total_weekly_cap)) * 100, 1)
+
+        overbooked = []
+        for s in schedules:
+            if s.doctor:
+                doc_name = s.doctor.full_name or s.doctor.name
+                b_count = Booking.objects.filter(doctor_name=doc_name, is_active=True).exclude(status="Disabled").count()
+                max_cap = s.total_weekly_capacity or (s.capacity * len(s.duty_days or [1]))
+                if b_count > max_cap:
+                    overbooked.append({
+                        "sched_id": s.sched_id,
+                        "doctorName": doc_name,
+                        "bookedCount": b_count,
+                        "capacity": max_cap
+                    })
+
+        return Response({
+            "totalConfiguredCapacity": total_weekly_cap,
+            "activeSchedulesCount": active_sched_count,
+            "totalActiveBookings": total_bookings,
+            "facilityCapacityUtilizationPct": utilization_pct,
+            "overbookedSchedulesCount": len(overbooked),
+            "overbookedSchedules": overbooked,
+        }, status=status.HTTP_200_OK)
+
+    def perform_create(self, serializer):
+        sched_obj = serializer.save()
+        self.sync_doctor_from_schedule(sched_obj)
+
+    def perform_update(self, serializer):
+        sched_obj = serializer.save()
+        self.sync_doctor_from_schedule(sched_obj)
 
     def create(self, request, *args, **kwargs):
         import time
@@ -234,14 +317,20 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
         data = request.data
         sched_id = data.get('sched_id') or data.get('id') or f"sched-{int(time.time() * 1000)}"
         doc_id = data.get('doctor_id') or data.get('doctorId') or data.get('doctor')
+        if isinstance(doc_id, dict):
+            doc_id = doc_id.get('doc_id') or doc_id.get('id')
         doc_name = data.get('doctor_name') or data.get('doctorName') or 'Specialist Doctor'
         specialty = data.get('specialty') or 'Specialist Consultation'
         room = data.get('room') or 'Consultation Suite 4B'
         duty_days = data.get('duty_days') or data.get('dutyDays') or []
         day_configs = data.get('day_configs') or data.get('dayConfigs') or {}
         shift_time = data.get('shift_time') or data.get('shiftTime') or '08:00 AM – 02:00 PM'
-        capacity = data.get('capacity') or 15
-        total_capacity = data.get('total_weekly_capacity') or data.get('totalWeeklyCapacity') or capacity
+        capacity = int(data.get('capacity') or 15)
+
+        if day_configs and isinstance(day_configs, dict):
+            total_capacity = sum(int(cfg.get('capacity', capacity)) for cfg in day_configs.values() if isinstance(cfg, dict))
+        else:
+            total_capacity = capacity * max(1, len(duty_days))
 
         # 1. Ensure Doctor object exists in Doctor DB table
         doc_obj = None
@@ -259,14 +348,8 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
                 acronym=doc_name,
                 specialty=specialty,
                 qualification='MBBS, FWACS',
-                room_number=room,
-                available_days=duty_days,
                 status=True
             )
-        else:
-            doc_obj.available_days = duty_days
-            doc_obj.room_number = room
-            doc_obj.save()
 
         # 2. Save / Update SpecialistSchedule in database
         sched_obj = SpecialistSchedule.objects.filter(sched_id=sched_id).first()
@@ -274,15 +357,16 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
             sched_obj = SpecialistSchedule(sched_id=sched_id)
 
         sched_obj.doctor = doc_obj
-        sched_obj.doctor_name = doc_name
-        sched_obj.specialty = specialty
         sched_obj.room = room
         sched_obj.duty_days = duty_days
         sched_obj.day_configs = day_configs
         sched_obj.shift_time = shift_time
         sched_obj.capacity = capacity
         sched_obj.total_weekly_capacity = total_capacity
-        sched_obj.status = True
+        if 'status' in data:
+            sched_obj.status = parse_bool_status(data['status'])
+        else:
+            sched_obj.status = True
         sched_obj.save()
 
         serializer = self.get_serializer(sched_obj)
@@ -623,5 +707,47 @@ class RoleViewSet(viewsets.ModelViewSet):
                 serializer.save()
                 return Response(serializer.data, status=status.HTTP_200_OK)
         return super().create(request, *args, **kwargs)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class CustomTokenRefreshView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        import time
+        refresh_token = (request.data.get('refresh') or request.data.get('refresh_token') or '').strip()
+        if not refresh_token:
+            return Response({'error': 'Refresh token is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            refresh = RefreshToken(refresh_token)
+            return Response({
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'expires_in': 86400
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': f'Invalid or expired refresh token: {str(e)}'}, status=status.HTTP_401_UNAUTHORIZED)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class HospitalEventStreamView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        import time
+        from django.http import StreamingHttpResponse
+
+        def event_stream():
+            yield f"data: {{\"type\": \"CONNECTED\", \"timestamp\": {int(time.time()*1000)}}}\n\n"
+            for _ in range(3):
+                time.sleep(5)
+                yield f"data: {{\"type\": \"HEARTBEAT\", \"timestamp\": {int(time.time()*1000)}}}\n\n"
+
+        response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+        response['Cache-Control'] = 'no-cache'
+        response['X-Accel-Buffering'] = 'no'
+        return response
 
 

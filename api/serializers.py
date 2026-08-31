@@ -78,16 +78,25 @@ class DoctorSerializer(serializers.ModelSerializer):
             if camel in data_copy:
                 if snake not in data_copy or not data_copy[snake]:
                     data_copy[snake] = data_copy[camel]
-                data_copy.pop(camel, None)
 
         dept_val = data_copy.get('department_id') or data_copy.get('departmentId') or data_copy.get('department')
         if dept_val:
-            dept_str = str(dept_val).strip()
-            dept_obj = Department.objects.filter(dept_id__iexact=dept_str).first()
+            if isinstance(dept_val, dict):
+                dept_str = str(dept_val.get('dept_id') or dept_val.get('id') or dept_val.get('name') or '').strip()
+            else:
+                dept_str = str(dept_val).strip()
+            dept_obj = Department.objects.filter(dept_id__iexact=dept_str).first() if dept_str else None
+            if not dept_obj and dept_str:
+                dept_obj = Department.objects.filter(name__icontains=dept_str).first()
             if dept_obj:
                 data_copy['department'] = dept_obj.dept_id
             else:
-                data_copy['department'] = None
+                if self.instance and self.instance.department:
+                    data_copy['department'] = self.instance.department.dept_id
+                else:
+                    data_copy['department'] = None
+        elif self.instance and self.instance.department:
+            data_copy['department'] = self.instance.department.dept_id
 
         if 'status' in data_copy:
             data_copy['status'] = parse_bool_status(data_copy['status'])
@@ -156,20 +165,25 @@ class SpecialistScheduleSerializer(serializers.ModelSerializer):
             if camel in data_copy:
                 if snake not in data_copy or not data_copy[snake]:
                     data_copy[snake] = data_copy[camel]
-                data_copy.pop(camel, None)
 
         doc_val = data_copy.get('doctor_id') or data_copy.get('doctorId') or data_copy.get('doctor')
         if doc_val:
-            doc_str = str(doc_val).strip()
-            doc_obj = Doctor.objects.filter(doc_id__iexact=doc_str).first()
+            if isinstance(doc_val, dict):
+                doc_str = str(doc_val.get('doc_id') or doc_val.get('id') or doc_val.get('name') or '').strip()
+            else:
+                doc_str = str(doc_val).strip()
+            doc_obj = Doctor.objects.filter(doc_id__iexact=doc_str).first() if doc_str else None
+            if not doc_obj and doc_str:
+                doc_obj = Doctor.objects.filter(name__iexact=doc_str).first() or Doctor.objects.filter(full_name__iexact=doc_str).first()
             if doc_obj:
                 data_copy['doctor'] = doc_obj.doc_id
-                if not data_copy.get('doctor_name'):
-                    data_copy['doctor_name'] = doc_obj.full_name or doc_obj.name
-                if not data_copy.get('specialty'):
-                    data_copy['specialty'] = doc_obj.specialty
             else:
-                data_copy['doctor'] = None
+                if self.instance and self.instance.doctor:
+                    data_copy['doctor'] = self.instance.doctor.doc_id
+                else:
+                    data_copy['doctor'] = None
+        elif self.instance and self.instance.doctor:
+            data_copy['doctor'] = self.instance.doctor.doc_id
 
         if 'status' in data_copy:
             data_copy['status'] = parse_bool_status(data_copy['status'])
@@ -178,14 +192,16 @@ class SpecialistScheduleSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        doc_id_val = instance.doctor.doc_id if instance.doctor else (getattr(instance, 'doctor_id', None) or '')
-        doc_name_val = instance.doctor_name or (instance.doctor.full_name if instance.doctor else '')
+        doc_id_val = instance.doctor.doc_id if instance.doctor else ''
+        doc_name_val = instance.doctor_name
+        specialty_val = instance.specialty
         ret['id'] = instance.sched_id
         ret['sched_id'] = instance.sched_id
         ret['doctorId'] = doc_id_val
         ret['doctor_id'] = doc_id_val
         ret['doctorName'] = doc_name_val
         ret['doctor_name'] = doc_name_val
+        ret['specialty'] = specialty_val
         ret['dutyDays'] = instance.duty_days or []
         ret['duty_days'] = instance.duty_days or []
         ret['dayConfigs'] = instance.day_configs or {}
@@ -199,38 +215,9 @@ class SpecialistScheduleSerializer(serializers.ModelSerializer):
 
 
 class BookingSerializer(serializers.ModelSerializer):
-    refCode = serializers.CharField(source='ref_code', required=False)
-    doctorId = serializers.CharField(source='doctor_id', required=False)
-    doctorName = serializers.CharField(source='doctor_name', required=False)
-    doctorSpecialty = serializers.CharField(source='doctor_specialty', required=False)
-    patientName = serializers.CharField(source='patient_name', required=False)
-    patientPhone = serializers.CharField(source='patient_phone', required=False)
-    patientEmail = serializers.EmailField(source='patient_email', required=False, allow_blank=True)
-    paymentType = serializers.CharField(source='payment_type', required=False)
-    hmoName = serializers.CharField(source='hmo_name', required=False, allow_blank=True)
-    hmoPolicyCode = serializers.CharField(source='hmo_policy_code', required=False, allow_blank=True)
-    hmoAuthCode = serializers.CharField(source='hmo_auth_code', required=False, allow_blank=True)
-    referralDocName = serializers.CharField(source='referral_doc_name', required=False, allow_blank=True)
-    hmoStatus = serializers.CharField(source='hmo_status', required=False, allow_blank=True)
-    paymentStatus = serializers.CharField(source='payment_status', required=False, allow_blank=True)
-    paymentMethod = serializers.CharField(source='payment_method', required=False, allow_blank=True)
-    invoiceRef = serializers.CharField(source='invoice_ref', required=False, allow_blank=True)
-    isActive = serializers.BooleanField(source='is_active', required=False, default=True)
-    deleteReason = serializers.CharField(source='delete_reason', required=False, allow_blank=True)
-    createdAt = serializers.DateTimeField(source='created_at', read_only=True)
-
     class Meta:
         model = Booking
-        fields = [
-            'ref_code', 'refCode', 'doctor_id', 'doctorId', 'doctor_name', 'doctorName',
-            'doctor_specialty', 'doctorSpecialty', 'date', 'time', 'patient_name', 'patientName',
-            'patient_phone', 'patientPhone', 'patient_email', 'patientEmail', 'reason',
-            'payment_type', 'paymentType', 'hmo_name', 'hmoName', 'hmo_policy_code', 'hmoPolicyCode',
-            'hmo_auth_code', 'hmoAuthCode', 'referral_doc_name', 'referralDocName', 'hmo_status',
-            'hmoStatus', 'payment_status', 'paymentStatus', 'payment_method', 'paymentMethod',
-            'invoice_ref', 'invoiceRef', 'status', 'is_active', 'isActive', 'delete_reason', 'deleteReason',
-            'created_at', 'createdAt'
-        ]
+        fields = '__all__'
 
     def to_internal_value(self, data):
         data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
@@ -256,11 +243,122 @@ class BookingSerializer(serializers.ModelSerializer):
         }
         for camel, snake in mapping.items():
             if camel in data_copy:
-                if snake not in data_copy or not data_copy[snake]:
+                if snake not in data_copy or data_copy[snake] is None or data_copy[snake] == '':
                     data_copy[snake] = data_copy[camel]
-                data_copy.pop(camel, None)
 
         return super().to_internal_value(data_copy)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['refCode'] = instance.ref_code
+        ret['doctorId'] = instance.doctor_id
+        ret['doctorName'] = instance.doctor_name
+        ret['doctorSpecialty'] = instance.doctor_specialty
+        ret['patientName'] = instance.patient_name
+        ret['patientPhone'] = instance.patient_phone
+        ret['patientEmail'] = instance.patient_email
+        ret['paymentType'] = instance.payment_type
+        ret['hmoName'] = instance.hmo_name
+        ret['hmoPolicyCode'] = instance.hmo_policy_code
+        ret['hmoAuthCode'] = instance.hmo_auth_code
+        ret['referralDocName'] = instance.referral_doc_name
+        ret['hmoStatus'] = instance.hmo_status
+        ret['paymentStatus'] = instance.payment_status
+        ret['paymentMethod'] = instance.payment_method
+        ret['invoiceRef'] = instance.invoice_ref
+        ret['isActive'] = instance.is_active
+        ret['deleteReason'] = instance.delete_reason
+        ret['createdAt'] = instance.created_at.isoformat() if instance.created_at else None
+        return ret
+
+    def validate(self, data):
+        data = super().validate(data)
+        date_str = data.get('date')
+        time_str = data.get('time')
+        doc_id = data.get('doctor_id') or data.get('doctorId') or data.get('doctor')
+        doc_name = data.get('doctor_name') or data.get('doctorName')
+
+        # 1. Backend Inactive Schedule & Status Validation
+        doc_obj = None
+        if doc_id:
+            if isinstance(doc_id, Doctor):
+                doc_obj = doc_id
+            else:
+                doc_obj = Doctor.objects.filter(doc_id__iexact=str(doc_id).strip()).first()
+        if not doc_obj and doc_name:
+            doc_obj = Doctor.objects.filter(name__iexact=str(doc_name).strip()).first() or Doctor.objects.filter(full_name__iexact=str(doc_name).strip()).first()
+
+        if doc_obj:
+            if not doc_obj.status:
+                raise serializers.ValidationError({
+                    "error": f"Doctor Profile Inactive: {doc_obj.full_name or doc_obj.name} is currently inactive or unavailable for appointments."
+                })
+            sched_obj = doc_obj.schedules.first()
+            if sched_obj and not sched_obj.status:
+                raise serializers.ValidationError({
+                    "error": f"Schedule Suspended: Clinic schedule for {doc_obj.full_name or doc_obj.name} is currently suspended or on leave."
+                })
+
+            # 2. Backend Daily Shift Capacity Validation
+            if date_str:
+                from .models import Booking
+                import datetime
+
+                dt_obj = None
+                try:
+                    dt_obj = datetime.datetime.strptime(str(date_str), '%Y-%m-%d')
+                except:
+                    pass
+
+                day_short = dt_obj.strftime('%a') if dt_obj else ''
+                max_capacity = 15
+                if sched_obj:
+                    day_cfgs = sched_obj.day_configs or {}
+                    if day_short in day_cfgs and isinstance(day_cfgs[day_short], dict):
+                        max_capacity = int(day_cfgs[day_short].get('capacity') or sched_obj.capacity or 15)
+                    elif sched_obj.capacity:
+                        max_capacity = int(sched_obj.capacity)
+
+                existing_count = Booking.objects.filter(
+                    doctor_name=doc_obj.full_name or doc_obj.name,
+                    date=date_str,
+                    is_active=True
+                ).exclude(status="Disabled").count()
+
+                if existing_count >= max_capacity:
+                    raise serializers.ValidationError({
+                        "error": f"Daily Shift Capacity Full: {doc_obj.full_name or doc_obj.name} has reached maximum daily patient capacity ({max_capacity} visits) for {date_str}. Please select another date."
+                    })
+
+        if date_str and time_str:
+            import datetime, re
+            from django.utils import timezone
+
+            now_local = timezone.localtime(timezone.now())
+            today_str = now_local.strftime('%Y-%m-%d')
+
+            if date_str == today_str:
+                match = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)?', str(time_str), re.IGNORECASE)
+                if match:
+                    hour = int(match.group(1))
+                    minute = int(match.group(2))
+                    ampm = match.group(3)
+                    if ampm:
+                        ampm = ampm.upper()
+                        if ampm == 'PM' and hour < 12:
+                            hour += 12
+                        elif ampm == 'AM' and hour == 12:
+                            hour = 0
+
+                    clinic_start = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    time_diff_minutes = (clinic_start - now_local).total_seconds() / 60.0
+
+                    if time_diff_minutes < 30:
+                        raise serializers.ValidationError({
+                            "error": "Same-Day Cutoff Restriction: Online bookings for today's clinic must be placed at least 30 minutes prior to the clinic start time. Please select a future date or contact hospital reception."
+                        })
+
+        return data
 
     def create(self, validated_data):
         import random
