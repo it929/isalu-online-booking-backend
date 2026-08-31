@@ -19,16 +19,60 @@ class Department(models.Model):
 
 class Doctor(models.Model):
     doc_id = models.CharField(max_length=100, primary_key=True)
-    name = models.CharField(max_length=200, help_text="Public display name / acronym (e.g. Specialist A)")
-    full_name = models.CharField(max_length=200, blank=True, default='', help_text="Full real name for Admin (e.g. Dr. Adewale Olusola)")
-    acronym = models.CharField(max_length=50, blank=True, default='', help_text="Saved acronym (e.g. Specialist A)")
+
+    name = models.CharField(
+        max_length=200,
+        help_text="Public display name / acronym (e.g. Specialist A)"
+    )
+
+    full_name = models.CharField(
+        max_length=200,
+        blank=True,
+        default='',
+        help_text="Full real name for Admin"
+    )
+
+    acronym = models.CharField(
+        max_length=50,
+        blank=True,
+        default=''
+    )
+
     specialty = models.CharField(max_length=200)
-    department = models.ForeignKey(Department, on_delete=models.SET_NULL, null=True, blank=True, related_name='doctors')
-    qualification = models.CharField(max_length=250, default='MBBS, FWACS')
-    qualifications = models.CharField(max_length=250, default='MBBS, FWACS')
-    image = models.TextField(blank=True, default='')
-    bio = models.TextField(blank=True, default='Senior Medical Consultant specializing in high-quality clinical care at Isalu Hospitals.')
-    accepted_patient_types = models.JSONField(default=list, blank=True, help_text="Accepted patient categories e.g. ['Private Self-Pay', 'HMO Insurance']")
+
+    department = models.ForeignKey(
+        Department,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='doctors'
+    )
+
+    qualification = models.CharField(
+        max_length=250,
+        default='MBBS, FWACS'
+    )
+
+    qualifications = models.CharField(
+        max_length=250,
+        default='MBBS, FWACS'
+    )
+
+    image = models.TextField(
+        blank=True,
+        default=''
+    )
+
+    bio = models.TextField(
+        blank=True,
+        default='Senior Medical Consultant specializing in high-quality clinical care at Isalu Hospitals.'
+    )
+
+    accepted_patient_types = models.JSONField(
+        default=list,
+        blank=True
+    )
+
     status = models.BooleanField(default=True)
 
     class Meta:
@@ -37,29 +81,38 @@ class Doctor(models.Model):
     def save(self, *args, **kwargs):
         if self.department:
             self.specialty = self.department.name
+
         super().save(*args, **kwargs)
 
     @property
     def available_days(self):
         days = []
-        for s in self.schedules.all():
-            for d in (s.duty_days or []):
-                if d not in days:
-                    days.append(d)
+
+        for schedule in self.schedules.all():
+            for day in (schedule.duty_days or []):
+                if day not in days:
+                    days.append(day)
+
         return days
 
     @property
     def time_slots(self):
         slots = []
-        for s in self.schedules.all():
-            if s.shift_time and s.shift_time not in slots:
-                slots.append(s.shift_time)
+
+        for schedule in self.schedules.all():
+            if schedule.shift_time and schedule.shift_time not in slots:
+                slots.append(schedule.shift_time)
+
         return slots
 
     @property
     def room_number(self):
-        sched = self.schedules.first()
-        return sched.room if (sched and sched.room) else "Consultation Suite 4B"
+        schedule = self.schedules.first()
+
+        if schedule and schedule.room:
+            return schedule.room
+
+        return "Consultation Suite 4B"
 
     def __str__(self):
         return f"{self.full_name or self.name} - {self.acronym or self.name}"
@@ -109,6 +162,8 @@ class Booking(models.Model):
     hmo_policy_code = models.CharField(max_length=100, blank=True, default='')
     hmo_auth_code = models.CharField(max_length=100, blank=True, default='')
     referral_doc_name = models.CharField(max_length=200, blank=True, default='')
+    referral_doc_data = models.TextField(blank=True, default='')
+    referral_doc_text = models.TextField(blank=True, default='')
     hmo_status = models.TextField(blank=True, default='N/A')
     payment_status = models.CharField(max_length=100, default='Pending')
     payment_method = models.CharField(max_length=100, blank=True, default='POS / Cash')
@@ -186,3 +241,14 @@ class CustomTimeSlot(models.Model):
         return self.label
 
 
+
+class AppSetting(models.Model):
+    key = models.CharField(max_length=100, primary_key=True)
+    value = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['key']
+
+    def __str__(self):
+        return self.key
