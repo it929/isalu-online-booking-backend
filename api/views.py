@@ -14,6 +14,9 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+
 from rest_framework import viewsets, status
 from rest_framework.views import APIView
 from rest_framework.decorators import action
@@ -56,11 +59,86 @@ from .serializers import (
 # HELPER FUNCTIONS
 # ============================================================
 
+def broadcast_booking_update(booking, event_type="BOOKING_UPDATE", message="", extra_data=None):
+    """
+    Broadcast a real-time booking event to the Channels layer for dashboard sync.
+    Targeted to the 'hospital_feed' group and specific patient user channel if available.
+    """
+    try:
+        channel_layer = get_channel_layer()
+        if not channel_layer:
+            return
+
+        payload = {
+            "event_type": event_type,
+            "ref_code": getattr(booking, "ref_code", ""),
+            "status": getattr(booking, "status", ""),
+            "payment_status": getattr(booking, "payment_status", ""),
+            "hmo_status": getattr(booking, "hmo_status", ""),
+            "patient_name": getattr(booking, "patient_name", ""),
+            "doctor_id": getattr(booking, "doctor_id", ""),
+            "date": str(getattr(booking, "date", "")),
+            "time_slot": getattr(booking, "time_slot", ""),
+            "is_active": getattr(booking, "is_active", True),
+            "message": message or f"Booking {getattr(booking, 'ref_code', '')} updated.",
+            "timestamp": int(time.time() * 1000),
+        }
+
+        if extra_data and isinstance(extra_data, dict):
+            payload.update(extra_data)
+
+        # 1. Broadcast to the central live hospital dashboard
+        async_to_sync(channel_layer.group_send)(
+            "hospital_feed",
+            {
+                "type": "booking_update",
+                "payload": payload,
+            },
+        )
+
+        # 2. If booking is linked to a registered patient user, notify their private group
+        patient_user_id = getattr(booking, "user_id", None)
+        if patient_user_id:
+            async_to_sync(channel_layer.group_send)(
+                f"user_{patient_user_id}",
+                {
+                    "type": "booking_update",
+                    "payload": payload,
+                },
+            )
+    except Exception as e:
+        # Prevent socket failures from breaking DB transactions
+        print(f"[WebSocket Broadcast Warning] Failed to publish event: {e}")
+
+
+def broadcast_bulk_refresh(action_name="BULK_UPDATE", message=""):
+    """
+    Broadcast a general trigger instructing hospital dashboards to invalidate caches or refresh.
+    """
+    try:
+        channel_layer = get_channel_layer()
+        if not channel_layer:
+            return
+
+        async_to_sync(channel_layer.group_send)(
+            "hospital_feed",
+            {
+                "type": "booking_update",
+                "payload": {
+                    "event_type": action_name,
+                    "message": message,
+                    "timestamp": int(time.time() * 1000),
+                },
+            },
+        )
+    except Exception as e:
+        print(f"[WebSocket Bulk Broadcast Warning] {e}")
+
+
 def parse_bool_status(value, default=True):
     """
     Safely convert common frontend boolean/status values to bool.
     """
-
     if value is None:
         return default
 
@@ -101,7 +179,6 @@ def safe_int(value, default=0, minimum=None):
     """
     Safely convert a value to integer.
     """
-
     try:
         result = int(value)
     except (TypeError, ValueError):
@@ -117,7 +194,6 @@ def generate_id(prefix):
     """
     Generate a frontend-friendly unique ID.
     """
-
     return f"{prefix}-{int(time.time() * 1000)}-{random.randint(100, 999)}"
 
 
@@ -130,7 +206,6 @@ def is_staff_request(request):
         - JWT Bearer authentication
         - Token-style Authorization headers
     """
-
     if (
         hasattr(request, "user")
         and request.user
@@ -163,7 +238,6 @@ def is_staff_request(request):
 
     try:
         validated_token = AccessToken(token_str)
-
         user_id = validated_token.get("user_id")
 
         if not user_id:
@@ -178,7 +252,6 @@ def is_staff_request(request):
             return False
 
         request.user = user
-
         return True
 
     except Exception:
@@ -189,7 +262,6 @@ def get_doctor_name(doctor):
     """
     Return the best display name for a doctor.
     """
-
     if not doctor:
         return "Specialist Doctor"
 
@@ -205,7 +277,6 @@ def get_doctor_specialty(doctor):
     """
     Return the best specialty for a doctor.
     """
-
     if not doctor:
         return "General Medicine"
 
@@ -234,7 +305,6 @@ def get_or_create_doctor_schedule(
     Therefore those properties must NEVER be assigned directly.
     Schedule information belongs to SpecialistSchedule.
     """
-
     if not doctor:
         return None
 
@@ -271,7 +341,6 @@ def get_or_create_doctor_schedule(
 
     if day_configs and isinstance(day_configs, dict):
         total_capacity = 0
-
         for config in day_configs.values():
             if isinstance(config, dict):
                 total_capacity += safe_int(
@@ -292,11 +361,9 @@ def get_or_create_doctor_schedule(
         )
 
     schedule.total_weekly_capacity = total_capacity
-
     schedule.doctor_name = get_doctor_name(doctor)
     schedule.specialty = get_doctor_specialty(doctor)
     schedule.status = True
-
     schedule.save()
 
     return schedule
@@ -308,12 +375,10 @@ def get_or_create_doctor_schedule(
 
 @method_decorator(csrf_exempt, name="dispatch")
 class StaffLoginView(APIView):
-
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def post(self, request):
-
         data = request.data or {}
 
         username_input = (
@@ -353,12 +418,10 @@ class StaffLoginView(APIView):
         )
 
         if user_obj and not user_obj.is_active:
-
             user_name = (
                 user_obj.first_name
                 or user_obj.username
             )
-
             return Response(
                 {
                     "error": (
@@ -382,7 +445,6 @@ class StaffLoginView(APIView):
             )
 
         if user and user.is_active:
-
             refresh = RefreshToken.for_user(user)
 
             role_name = (
@@ -399,16 +461,12 @@ class StaffLoginView(APIView):
 
             try:
                 profile = user.profile
-
                 if profile and profile.role:
-
                     role_name = profile.role.name
-
                     desk_name = (
                         profile.role.primary_desk
                         or desk_name
                     )
-
             except UserProfile.DoesNotExist:
                 pass
 
@@ -421,7 +479,6 @@ class StaffLoginView(APIView):
             return Response(
                 {
                     "message": "Staff login successful",
-
                     "user": {
                         "id": user.id,
                         "username": user.username,
@@ -433,7 +490,6 @@ class StaffLoginView(APIView):
                         "role": role_name,
                         "desk": desk_name,
                     },
-
                     "tokens": {
                         "refresh": str(refresh),
                         "access": str(refresh.access_token),
@@ -458,13 +514,11 @@ class StaffLoginView(APIView):
 # ============================================================
 
 class DepartmentViewSet(viewsets.ModelViewSet):
-
     serializer_class = DepartmentSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "dept_id"
 
     def get_queryset(self):
-
         queryset = (Department.objects.all().order_by("name"))
 
         if self.action in (
@@ -492,12 +546,9 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         )
 
         if status_param:
-
             st = str(status_param).strip().lower()
-
             if st in ("active", "true", "1"):
                 queryset = queryset.filter(status=True)
-
             elif st in (
                 "disabled",
                 "maintenance",
@@ -507,15 +558,11 @@ class DepartmentViewSet(viewsets.ModelViewSet):
                 "0",
             ):
                 queryset = queryset.filter(status=False)
-
         elif not include_disabled:
-
             queryset = queryset.filter(status=True)
 
         if search_param:
-
             q = str(search_param).strip()
-
             queryset = queryset.filter(
                 Q(name__icontains=q)
                 | Q(dept_id__icontains=q)
@@ -526,9 +573,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         return queryset
 
     def destroy(self, request, *args, **kwargs):
-
         department = self.get_object()
-
         department.status = False
         department.save(update_fields=["status"])
 
@@ -551,9 +596,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         url_path="restore",
     )
     def restore(self, request, *args, **kwargs):
-
         department = self.get_object()
-
         department.status = True
         department.save(update_fields=["status"])
 
@@ -587,19 +630,6 @@ class DoctorViewSet(viewsets.ModelViewSet):
         permission_classes=[AllowAny],
     )
     def available_dates(self, request, *args, **kwargs):
-        """
-        Dates this doctor can actually be booked on.
-
-        Applies duty_days plus any alternating-week recurrence held in
-        day_configs, e.g. {"Sat": {"weeks": [1, 3]}} for a doctor who
-        works only the 1st and 3rd Saturday of each month.
-
-        Query params:
-            days  how many days ahead to return (default 90, max 365)
-            from  ISO start date (default today)
-        """
-        import datetime
-
         doctor = self.get_object()
 
         try:
@@ -670,7 +700,6 @@ class DoctorViewSet(viewsets.ModelViewSet):
         })
 
     def get_queryset(self):
-
         queryset = (
             Doctor.objects
             .all()
@@ -685,9 +714,7 @@ class DoctorViewSet(viewsets.ModelViewSet):
         )
 
         if dept_param and str(dept_param).strip().lower() != "all":
-
             dept_clean = str(dept_param).strip().lower()
-
             queryset = queryset.filter(
                 department__dept_id__iexact=dept_clean
             )
@@ -695,9 +722,7 @@ class DoctorViewSet(viewsets.ModelViewSet):
         search = self.request.query_params.get("search")
 
         if search:
-
             search = str(search).strip()
-
             queryset = queryset.filter(
                 Q(doc_id__icontains=search)
                 | Q(name__icontains=search)
@@ -709,27 +734,15 @@ class DoctorViewSet(viewsets.ModelViewSet):
         status_param = self.request.query_params.get("status")
 
         if status_param is not None:
-
             value = str(status_param).lower().strip()
-
             if value in ["active", "true", "1"]:
                 queryset = queryset.filter(status=True)
-
             elif value in ["inactive", "disabled", "false", "0"]:
                 queryset = queryset.filter(status=False)
 
         return queryset
 
     def sync_linked_schedules(self, doctor):
-        """
-        Synchronize schedules belonging to this doctor.
-
-        IMPORTANT:
-        room_number, available_days and time_slots are properties
-        on Doctor. They must NOT be assigned directly.
-        Their values come from SpecialistSchedule.
-        """
-
         if not doctor:
             return
 
@@ -749,9 +762,7 @@ class DoctorViewSet(viewsets.ModelViewSet):
         )
 
         for schedule in schedules:
-
             schedule.doctor = doctor
-
             schedule.doctor_name = doctor_display_name
 
             if doctor.specialty:
@@ -771,25 +782,14 @@ class DoctorViewSet(viewsets.ModelViewSet):
         self.sync_linked_schedules(doctor)
 
     def create(self, request, *args, **kwargs):
-        import time
-
         data = request.data
-
-        # --------------------------------------------------
-        # DOCTOR ID
-        # --------------------------------------------------
 
         doc_id = (
             data.get('doc_id')
             or data.get('id')
             or f"doc-{int(time.time() * 1000)}-{random.randint(100, 999)}"
         )
-
         doc_id = str(doc_id).strip()
-
-        # --------------------------------------------------
-        # BASIC INFORMATION
-        # --------------------------------------------------
 
         name = (
             data.get('name')
@@ -829,10 +829,6 @@ class DoctorViewSet(viewsets.ModelViewSet):
             ]
         )
 
-        # --------------------------------------------------
-        # DEPARTMENT
-        # --------------------------------------------------
-
         dept_id = (
             data.get('departmentId')
             or data.get('department_id')
@@ -852,7 +848,6 @@ class DoctorViewSet(viewsets.ModelViewSet):
 
         if dept_value:
             dept_value = str(dept_value).strip()
-
             department = (
                 Department.objects
                 .filter(dept_id__iexact=dept_value)
@@ -866,7 +861,6 @@ class DoctorViewSet(viewsets.ModelViewSet):
                     .first()
                 )
 
-        # Try specialty as fallback
         if not department and specialty:
             department = (
                 Department.objects
@@ -874,35 +868,19 @@ class DoctorViewSet(viewsets.ModelViewSet):
                 .first()
             )
 
-        # --------------------------------------------------
-        # CREATE / UPDATE DOCTOR
-        # --------------------------------------------------
-
         doctor = Doctor.objects.filter(
             doc_id=doc_id
         ).first()
 
         if doctor is None:
-            doctor = Doctor(
-                doc_id=doc_id
-            )
+            doctor = Doctor(doc_id=doc_id)
 
         doctor.name = str(name).strip()
-
         doctor.full_name = str(full_name).strip()
-
         doctor.acronym = str(acronym).strip()
-
         doctor.specialty = str(specialty).strip()
-
-        doctor.qualification = str(
-            qualification
-        ).strip()
-
-        doctor.qualifications = str(
-            qualification
-        ).strip()
-
+        doctor.qualification = str(qualification).strip()
+        doctor.qualifications = str(qualification).strip()
         doctor.accepted_patient_types = (
             accepted_types
             if isinstance(accepted_types, list)
@@ -912,22 +890,8 @@ class DoctorViewSet(viewsets.ModelViewSet):
         if department:
             doctor.department = department
 
-        # IMPORTANT:
-        # DO NOT DO:
-        #
-        # doctor.room_number = ...
-        # doctor.available_days = ...
-        # doctor.time_slots = ...
-        #
-        # Those are read-only properties.
-
         doctor.status = True
-
         doctor.save()
-
-        # --------------------------------------------------
-        # CREATE / UPDATE SCHEDULE
-        # --------------------------------------------------
 
         room = (
             data.get('roomNumber')
@@ -955,14 +919,12 @@ class DoctorViewSet(viewsets.ModelViewSet):
             ]
         )
 
-        # Normalize values
         if not isinstance(available_days, list):
             available_days = [available_days]
 
         if not isinstance(time_slots, list):
             time_slots = [time_slots]
 
-        # Create schedule only when schedule data was supplied
         schedule_id = data.get('sched_id')
 
         if schedule_id:
@@ -975,7 +937,6 @@ class DoctorViewSet(viewsets.ModelViewSet):
             ).first()
 
         if schedule is None:
-
             schedule = SpecialistSchedule(
                 sched_id=(
                     str(schedule_id)
@@ -985,34 +946,24 @@ class DoctorViewSet(viewsets.ModelViewSet):
             )
 
         schedule.doctor = doctor
-
         schedule.doctor_name = (
             doctor.full_name
             or doctor.name
         )
-
         schedule.specialty = (
             doctor.specialty
             or specialty
         )
-
         schedule.room = str(room).strip()
-
         schedule.duty_days = available_days
-
         schedule.shift_time = (
             time_slots[0]
             if time_slots
             else '08:00 AM – 02:00 PM'
         )
-
         schedule.capacity = int(
             data.get('capacity') or 15
         )
-
-        # --------------------------------------------------
-        # DAY CONFIGURATION
-        # --------------------------------------------------
 
         day_configs = (
             data.get('day_configs')
@@ -1026,13 +977,9 @@ class DoctorViewSet(viewsets.ModelViewSet):
         schedule.day_configs = day_configs
 
         if day_configs:
-
             total_capacity = 0
-
             for config in day_configs.values():
-
                 if isinstance(config, dict):
-
                     try:
                         total_capacity += int(
                             config.get(
@@ -1048,30 +995,19 @@ class DoctorViewSet(viewsets.ModelViewSet):
                     schedule.capacity
                     * max(1, len(available_days))
                 )
-
         else:
-
             total_capacity = (
                 schedule.capacity
                 * max(1, len(available_days))
             )
 
         schedule.total_weekly_capacity = total_capacity
-
         schedule.status = parse_bool_status(
             data.get('status', True)
         )
-
         schedule.save()
 
-        # --------------------------------------------------
-        # RESPONSE
-        # --------------------------------------------------
-
-        serializer = self.get_serializer(
-            doctor
-        )
-
+        serializer = self.get_serializer(doctor)
         return Response(
             serializer.data,
             status=status.HTTP_201_CREATED
@@ -1083,13 +1019,11 @@ class DoctorViewSet(viewsets.ModelViewSet):
 # ============================================================
 
 class SpecialistScheduleViewSet(viewsets.ModelViewSet):
-
     serializer_class = SpecialistScheduleSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "sched_id"
 
     def get_queryset(self):
-
         return (
             SpecialistSchedule.objects
             .all()
@@ -1101,7 +1035,6 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
         )
 
     def sync_doctor_from_schedule(self, schedule):
-
         if not schedule:
             return
 
@@ -1115,39 +1048,23 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
                 None,
             )
         ):
-
-            doctor_name = str(
-                schedule.doctor_name
-            ).strip()
-
+            doctor_name = str(schedule.doctor_name).strip()
             doctor = (
                 Doctor.objects
-                .filter(
-                    name__iexact=doctor_name
-                )
+                .filter(name__iexact=doctor_name)
                 .first()
             )
-
             if not doctor:
-
                 doctor = (
                     Doctor.objects
-                    .filter(
-                        full_name__iexact=doctor_name
-                    )
+                    .filter(full_name__iexact=doctor_name)
                     .first()
                 )
 
         if doctor and not schedule.doctor:
-
             schedule.doctor = doctor
-            schedule.doctor_name = (
-                get_doctor_name(doctor)
-            )
-            schedule.specialty = (
-                get_doctor_specialty(doctor)
-            )
-
+            schedule.doctor_name = get_doctor_name(doctor)
+            schedule.specialty = get_doctor_specialty(doctor)
             schedule.save()
 
     @action(
@@ -1156,36 +1073,22 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
         url_path="capacity-analytics",
     )
     def capacity_analytics(self, request):
-
         schedules = (
             SpecialistSchedule.objects
             .filter(status=True)
         )
 
         total_weekly_capacity = 0
-
         for schedule in schedules:
-
             if schedule.total_weekly_capacity:
-
-                total_weekly_capacity += (
-                    schedule.total_weekly_capacity
-                )
-
+                total_weekly_capacity += schedule.total_weekly_capacity
             else:
-
                 total_weekly_capacity += (
                     schedule.capacity
-                    * max(
-                        1,
-                        len(
-                            schedule.duty_days or []
-                        ),
-                    )
+                    * max(1, len(schedule.duty_days or []))
                 )
 
         active_schedule_count = schedules.count()
-
         total_bookings = (
             Booking.objects
             .filter(is_active=True)
@@ -1196,35 +1099,25 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
         utilization_pct = round(
             (
                 total_bookings
-                / max(
-                    1,
-                    total_weekly_capacity,
-                )
+                / max(1, total_weekly_capacity)
             )
             * 100,
             1,
         )
 
         overbooked = []
-
         for schedule in schedules:
-
             if not schedule.doctor:
                 continue
 
-            doctor_name = get_doctor_name(
-                schedule.doctor
-            )
-
+            doctor_name = get_doctor_name(schedule.doctor)
             booking_count = (
                 Booking.objects
                 .filter(
                     doctor_id=schedule.doctor.doc_id,
                     is_active=True,
                 )
-                .exclude(
-                    status="Disabled"
-                )
+                .exclude(status="Disabled")
                 .count()
             )
 
@@ -1232,17 +1125,11 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
                 schedule.total_weekly_capacity
                 or (
                     schedule.capacity
-                    * max(
-                        1,
-                        len(
-                            schedule.duty_days or []
-                        ),
-                    )
+                    * max(1, len(schedule.duty_days or []))
                 )
             )
 
             if booking_count > capacity:
-
                 overbooked.append(
                     {
                         "sched_id": schedule.sched_id,
@@ -1255,46 +1142,26 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
 
         return Response(
             {
-                "totalConfiguredCapacity":
-                    total_weekly_capacity,
-
-                "activeSchedulesCount":
-                    active_schedule_count,
-
-                "totalActiveBookings":
-                    total_bookings,
-
-                "facilityCapacityUtilizationPct":
-                    utilization_pct,
-
-                "overbookedSchedulesCount":
-                    len(overbooked),
-
-                "overbookedSchedules":
-                    overbooked,
+                "totalConfiguredCapacity": total_weekly_capacity,
+                "activeSchedulesCount": active_schedule_count,
+                "totalActiveBookings": total_bookings,
+                "facilityCapacityUtilizationPct": utilization_pct,
+                "overbookedSchedulesCount": len(overbooked),
+                "overbookedSchedules": overbooked,
             },
             status=status.HTTP_200_OK,
         )
 
     def perform_create(self, serializer):
-
         schedule = serializer.save()
-
-        self.sync_doctor_from_schedule(
-            schedule
-        )
+        self.sync_doctor_from_schedule(schedule)
 
     def perform_update(self, serializer):
-
         schedule = serializer.save()
-
-        self.sync_doctor_from_schedule(
-            schedule
-        )
+        self.sync_doctor_from_schedule(schedule)
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
-
         data = request.data
 
         sched_id = (
@@ -1302,10 +1169,7 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
             or data.get("id")
             or generate_id("sched")
         )
-
-        sched_id = str(
-            sched_id
-        ).strip()
+        sched_id = str(sched_id).strip()
 
         doc_id = (
             data.get("doctor_id")
@@ -1314,7 +1178,6 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
         )
 
         if isinstance(doc_id, dict):
-
             doc_id = (
                 doc_id.get("doc_id")
                 or doc_id.get("id")
@@ -1364,50 +1227,29 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
             minimum=1,
         )
 
-        # ----------------------------------------------------
-        # FIND DOCTOR
-        # ----------------------------------------------------
-
         doctor = None
 
         if doc_id:
-
             doctor = (
                 Doctor.objects
-                .filter(
-                    doc_id__iexact=str(
-                        doc_id
-                    ).strip()
-                )
+                .filter(doc_id__iexact=str(doc_id).strip())
                 .first()
             )
 
         if not doctor and doc_name:
-
             doctor = (
                 Doctor.objects
-                .filter(
-                    name__iexact=str(
-                        doc_name
-                    ).strip()
-                )
+                .filter(name__iexact=str(doc_name).strip())
                 .first()
             )
-
             if not doctor:
-
                 doctor = (
                     Doctor.objects
-                    .filter(
-                        full_name__iexact=str(
-                            doc_name
-                        ).strip()
-                    )
+                    .filter(full_name__iexact=str(doc_name).strip())
                     .first()
                 )
 
         if not doctor:
-
             return Response(
                 {
                     "error": (
@@ -1419,21 +1261,10 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # ----------------------------------------------------
-        # CALCULATE CAPACITY
-        # ----------------------------------------------------
-
-        if (
-            day_configs
-            and isinstance(day_configs, dict)
-        ):
-
+        if day_configs and isinstance(day_configs, dict):
             total_capacity = 0
-
             for config in day_configs.values():
-
                 if isinstance(config, dict):
-
                     total_capacity += safe_int(
                         config.get("capacity"),
                         default=capacity,
@@ -1441,87 +1272,41 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
                     )
 
             if total_capacity <= 0:
-
                 total_capacity = (
-                    capacity
-                    * max(
-                        1,
-                        len(duty_days),
-                    )
+                    capacity * max(1, len(duty_days))
                 )
-
         else:
-
             total_capacity = (
-                capacity
-                * max(
-                    1,
-                    len(duty_days),
-                )
+                capacity * max(1, len(duty_days))
             )
-
-        # ----------------------------------------------------
-        # CREATE OR UPDATE SCHEDULE
-        # ----------------------------------------------------
 
         schedule = (
             SpecialistSchedule.objects
-            .filter(
-                sched_id=sched_id
-            )
+            .filter(sched_id=sched_id)
             .first()
         )
 
         if not schedule:
-
-            schedule = SpecialistSchedule(
-                sched_id=sched_id
-            )
+            schedule = SpecialistSchedule(sched_id=sched_id)
 
         schedule.doctor = doctor
-
-        schedule.doctor_name = (
-            get_doctor_name(doctor)
-        )
-
+        schedule.doctor_name = get_doctor_name(doctor)
         schedule.specialty = (
-            specialty
-            or get_doctor_specialty(doctor)
+            specialty or get_doctor_specialty(doctor)
         )
-
-        schedule.room = str(
-            room
-        ).strip()
-
-        schedule.duty_days = (
-            duty_days
-        )
-
-        schedule.day_configs = (
-            day_configs
-        )
-
-        schedule.shift_time = str(
-            shift_time
-        ).strip()
-
+        schedule.room = str(room).strip()
+        schedule.duty_days = duty_days
+        schedule.day_configs = day_configs
+        schedule.shift_time = str(shift_time).strip()
         schedule.capacity = capacity
-
-        schedule.total_weekly_capacity = (
-            total_capacity
-        )
-
+        schedule.total_weekly_capacity = total_capacity
         schedule.status = parse_bool_status(
             data.get("status"),
             default=True,
         )
-
         schedule.save()
 
-        serializer = self.get_serializer(
-            schedule
-        )
-
+        serializer = self.get_serializer(schedule)
         return Response(
             serializer.data,
             status=status.HTTP_201_CREATED,
@@ -1533,21 +1318,16 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
 # ============================================================
 
 class BookingViewSet(viewsets.ModelViewSet):
-
     serializer_class = BookingSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "ref_code"
 
     def get_serializer_class(self):
-        # The list response previously included base64 referral documents
-        # (~21MB), which prevented the admin dashboard from rendering.
-        # Documents are still returned on detail retrieve.
         if self.action == "list":
             return BookingListSerializer
         return BookingSerializer
 
     def get_permissions(self):
-
         if self.action in (
             "create",
             "retrieve",
@@ -1559,7 +1339,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         ]
 
     def get_queryset(self):
-
         include_disabled = (
             self.request.query_params.get(
                 "include_disabled"
@@ -1578,10 +1357,16 @@ class BookingViewSet(viewsets.ModelViewSet):
             .exclude(status="Disabled")
         )
 
+    def perform_create(self, serializer):
+        booking = serializer.save()
+        broadcast_booking_update(
+            booking,
+            event_type="NEW_BOOKING",
+            message=f"New appointment booked for {booking.patient_name} ({booking.ref_code})."
+        )
+
     def list(self, request, *args, **kwargs):
-
         if not is_staff_request(request):
-
             return Response(
                 {
                     "detail": (
@@ -1600,9 +1385,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         )
 
     def destroy(self, request, *args, **kwargs):
-
         if not is_staff_request(request):
-
             return Response(
                 {
                     "detail": (
@@ -1626,8 +1409,14 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.is_active = False
         booking.status = "Disabled"
         booking.delete_reason = reason
-
         booking.save()
+
+        # Real-time WebSocket event
+        broadcast_booking_update(
+            booking,
+            event_type="BOOKING_DISABLED",
+            message=f"Booking {booking.ref_code} was disabled."
+        )
 
         return Response(
             {
@@ -1647,16 +1436,12 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking,
         request,
     ):
-
-        new_status = request.data.get(
-            "status"
-        )
+        new_status = request.data.get("status")
 
         if (
             new_status == "Completed"
             and booking.payment_status == "Pending"
         ):
-
             return Response(
                 {
                     "error": (
@@ -1676,7 +1461,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         *args,
         **kwargs,
     ):
-
         booking = self.get_object()
 
         error = self._validate_completion_payment(
@@ -1687,11 +1471,21 @@ class BookingViewSet(viewsets.ModelViewSet):
         if error:
             return error
 
-        return super().partial_update(
+        response = super().partial_update(
             request,
             *args,
             **kwargs,
         )
+
+        # Real-time WebSocket event
+        booking.refresh_from_db()
+        broadcast_booking_update(
+            booking,
+            event_type="BOOKING_UPDATED",
+            message=f"Booking {booking.ref_code} updated."
+        )
+
+        return response
 
     def update(
         self,
@@ -1699,7 +1493,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         *args,
         **kwargs,
     ):
-
         booking = self.get_object()
 
         error = self._validate_completion_payment(
@@ -1710,11 +1503,21 @@ class BookingViewSet(viewsets.ModelViewSet):
         if error:
             return error
 
-        return super().update(
+        response = super().update(
             request,
             *args,
             **kwargs,
         )
+
+        # Real-time WebSocket event
+        booking.refresh_from_db()
+        broadcast_booking_update(
+            booking,
+            event_type="BOOKING_UPDATED",
+            message=f"Booking {booking.ref_code} fully updated."
+        )
+
+        return response
 
     @action(
         detail=False,
@@ -1722,7 +1525,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="summary",
     )
     def summary(self, request):
-
         total = Booking.objects.count()
 
         checked_in = (
@@ -1733,23 +1535,15 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         pending_hmo = (
             Booking.objects
-            .filter(
-                payment_type="HMO Insurance"
-            )
-            .exclude(
-                hmo_status="Approved"
-            )
+            .filter(payment_type="HMO Insurance")
+            .exclude(hmo_status="Approved")
             .count()
         )
 
         pending_cash = (
             Booking.objects
-            .filter(
-                payment_type="Private Self-Pay"
-            )
-            .exclude(
-                payment_status="Cleared"
-            )
+            .filter(payment_type="Private Self-Pay")
+            .exclude(payment_status="Cleared")
             .count()
         )
 
@@ -1768,9 +1562,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="clear-all",
     )
     def clear_all(self, request):
-
         if not is_staff_request(request):
-
             return Response(
                 {
                     "detail": (
@@ -1795,6 +1587,12 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
         )
 
+        # Real-time WebSocket bulk refresh event
+        broadcast_bulk_refresh(
+            action_name="BOOKINGS_CLEARED",
+            message=f"{count} booking records were disabled by administrator."
+        )
+
         return Response(
             {
                 "message": (
@@ -1811,7 +1609,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         permission_classes=[AllowAny],
     )
     def availability(self, request):
-
         doctor_id = str(
             request.query_params.get(
                 "doctor_id"
@@ -1827,7 +1624,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         ).strip()
 
         if not doctor_id or not date_str:
-
             return Response(
                 {
                     "error": (
@@ -1838,14 +1634,11 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
 
         try:
-
             appointment_date = datetime.datetime.strptime(
                 date_str,
                 "%Y-%m-%d",
             ).date()
-
         except ValueError:
-
             return Response(
                 {
                     "error": (
@@ -1858,14 +1651,11 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         doctor = (
             Doctor.objects
-            .filter(
-                doc_id__iexact=doctor_id
-            )
+            .filter(doc_id__iexact=doctor_id)
             .first()
         )
 
         if not doctor:
-
             return Response(
                 {
                     "error": "Doctor not found."
@@ -1896,26 +1686,20 @@ class BookingViewSet(viewsets.ModelViewSet):
                 date=date_str,
                 is_active=True,
             )
-            .exclude(
-                status="Disabled"
-            )
+            .exclude(status="Disabled")
             .count()
         )
 
         on_duty = True
 
         if schedule and schedule.duty_days:
-
             day_name = (
-                appointment_date
-                .strftime("%A")
+                appointment_date.strftime("%A")
             )
-
             tokens = [
                 str(day).strip().lower()
                 for day in schedule.duty_days
             ]
-
             on_duty = any(
                 token == day_name.lower()
                 or day_name.lower().startswith(token)
@@ -1952,7 +1736,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         permission_classes=[AllowAny],
     )
     def public_lookup(self, request):
-
         ref_code = str(
             request.query_params.get(
                 "ref_code"
@@ -1968,7 +1751,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         ).strip()
 
         if not ref_code and not phone:
-
             return Response(
                 {
                     "error": (
@@ -1980,28 +1762,20 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
 
         if ref_code:
-
             booking = (
                 Booking.objects
-                .filter(
-                    ref_code__iexact=ref_code
-                )
+                .filter(ref_code__iexact=ref_code)
                 .first()
             )
-
         else:
-
             booking = (
                 Booking.objects
-                .filter(
-                    patient_phone__iexact=phone
-                )
+                .filter(patient_phone__iexact=phone)
                 .order_by("-created_at")
                 .first()
             )
 
         if not booking:
-
             return Response(
                 {
                     "error": "Appointment not found."
@@ -2011,10 +1785,8 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         if (
             phone
-            and booking.patient_phone.strip()
-            != phone
+            and booking.patient_phone.strip() != phone
         ):
-
             return Response(
                 {
                     "error": (
@@ -2026,9 +1798,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
 
         return Response(
-            BookingSerializer(
-                booking
-            ).data
+            BookingSerializer(booking).data
         )
 
     @action(
@@ -2037,7 +1807,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="disabled",
     )
     def disabled_bookings(self, request):
-
         queryset = Booking.objects.filter(
             Q(is_active=False)
             | Q(status="Disabled")
@@ -2062,17 +1831,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
-
         booking = (
             Booking.objects
-            .filter(
-                ref_code=ref_code
-            )
+            .filter(ref_code=ref_code)
             .first()
         )
 
         if not booking:
-
             return Response(
                 {
                     "error": (
@@ -2085,8 +1850,14 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.is_active = True
         booking.status = "Booked"
         booking.delete_reason = ""
-
         booking.save()
+
+        # Real-time WebSocket event
+        broadcast_booking_update(
+            booking,
+            event_type="BOOKING_RESTORED",
+            message=f"Booking {booking.ref_code} restored successfully."
+        )
 
         return Response(
             {
@@ -2110,17 +1881,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
-
         booking = (
             Booking.objects
-            .filter(
-                ref_code=ref_code
-            )
+            .filter(ref_code=ref_code)
             .first()
         )
 
         if not booking:
-
             return Response(
                 {
                     "error": (
@@ -2139,25 +1906,25 @@ class BookingViewSet(viewsets.ModelViewSet):
             or "Passed from HMO to Cashdesk"
         )
 
-        booking.payment_type = (
-            "Private Self-Pay"
-        )
-
+        booking.payment_type = "Private Self-Pay"
         booking.hmo_name = "N/A"
-
         booking.hmo_status = (
             "Re-routed to Cashdesk "
             f"(Self-Pay): {remark}"
         )
-
         booking.payment_status = "Pending"
-
         booking.delete_reason = (
             "Re-routed from HMO to Cashdesk: "
             f"{remark}"
         )
-
         booking.save()
+
+        # Real-time WebSocket event
+        broadcast_booking_update(
+            booking,
+            event_type="BOOKING_REROUTED_CASHDESK",
+            message=f"Ticket {booking.ref_code} re-routed to Cashdesk."
+        )
 
         return Response(
             {
@@ -2183,15 +1950,12 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
-
         booking = self.get_object()
 
         if (
-            booking.payment_type
-            == "HMO Insurance"
+            booking.payment_type == "HMO Insurance"
             and booking.hmo_status != "Approved"
         ):
-
             return Response(
                 {
                     "error": (
@@ -2206,7 +1970,6 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
 
         if booking.payment_status == "Pending":
-
             return Response(
                 {
                     "error": (
@@ -2220,8 +1983,14 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
 
         booking.status = "Checked In"
-
         booking.save()
+
+        # Real-time WebSocket event
+        broadcast_booking_update(
+            booking,
+            event_type="PATIENT_CHECKED_IN",
+            message=f"Patient {booking.patient_name} ({booking.ref_code}) checked in."
+        )
 
         return Response(
             {
@@ -2245,7 +2014,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
-
         booking = self.get_object()
 
         policy = (
@@ -2264,8 +2032,14 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.hmo_auth_code = auth
         booking.hmo_status = "Approved"
         booking.payment_status = "Cleared"
-
         booking.save()
+
+        # Real-time WebSocket event
+        broadcast_booking_update(
+            booking,
+            event_type="HMO_APPROVED",
+            message=f"HMO pre-authorization approved for ticket {booking.ref_code}."
+        )
 
         return Response(
             {
@@ -2290,7 +2064,6 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
-
         booking = self.get_object()
 
         method = (
@@ -2307,8 +2080,14 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.payment_status = "Cleared"
         booking.payment_method = method
         booking.invoice_ref = invoice
-
         booking.save()
+
+        # Real-time WebSocket event
+        broadcast_booking_update(
+            booking,
+            event_type="PAYMENT_CLEARED",
+            message=f"Cashdesk payment cleared via {method} for ticket {booking.ref_code}."
+        )
 
         return Response(
             {
@@ -2329,7 +2108,6 @@ class BookingViewSet(viewsets.ModelViewSet):
 # ============================================================
 
 class HmoCompanyViewSet(viewsets.ModelViewSet):
-
     queryset = (
         HmoCompany.objects
         .all()
@@ -2340,67 +2118,47 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
     lookup_field = "hmo_id"
 
     def create(self, request, *args, **kwargs):
-
         hmo_id = (
             request.data.get("hmo_id")
             or request.data.get("id")
         )
-
         name = request.data.get("name")
 
         if hmo_id:
-
             existing = (
                 HmoCompany.objects
                 .filter(hmo_id=hmo_id)
                 .first()
             )
-
             if existing:
-
                 serializer = self.get_serializer(
                     existing,
                     data=request.data,
                     partial=True,
                 )
-
-                serializer.is_valid(
-                    raise_exception=True
-                )
-
+                serializer.is_valid(raise_exception=True)
                 serializer.save()
-
                 return Response(
                     serializer.data,
                     status=status.HTTP_200_OK,
                 )
 
         if name:
-
             existing = (
                 HmoCompany.objects
                 .filter(
-                    name__iexact=str(
-                        name
-                    ).strip()
+                    name__iexact=str(name).strip()
                 )
                 .first()
             )
-
             if existing:
-
                 serializer = self.get_serializer(
                     existing,
                     data=request.data,
                     partial=True,
                 )
-
-                serializer.is_valid(
-                    raise_exception=True
-                )
-
+                serializer.is_valid(raise_exception=True)
                 serializer.save()
-
                 return Response(
                     serializer.data,
                     status=status.HTTP_200_OK,
@@ -2418,7 +2176,6 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
 # ============================================================
 
 class SystemUserViewSet(viewsets.ModelViewSet):
-
     queryset = (
         User.objects
         .all()
@@ -2427,53 +2184,37 @@ class SystemUserViewSet(viewsets.ModelViewSet):
             "-id",
         )
     )
-
     serializer_class = SystemUserSerializer
     permission_classes = [IsAuthenticated]
     lookup_field = "id"
 
     def get_object(self):
-
         lookup_url_kwarg = (
             self.lookup_url_kwarg
             or self.lookup_field
         )
-
-        value = str(
-            self.kwargs[
-                lookup_url_kwarg
-            ]
-        )
+        value = str(self.kwargs[lookup_url_kwarg])
 
         if value.startswith("usr-"):
             value = value[4:]
 
         try:
-            user = User.objects.get(
-                id=int(value)
-            )
+            user = User.objects.get(id=int(value))
         except (
             User.DoesNotExist,
             ValueError,
         ):
-
             from django.http import Http404
-
-            raise Http404(
-                "System user not found."
-            )
+            raise Http404("System user not found.")
 
         self.check_object_permissions(
             self.request,
             user,
         )
-
         return user
 
     def list(self, request, *args, **kwargs):
-
         if not is_staff_request(request):
-
             return Response(
                 {
                     "detail": (
@@ -2494,9 +2235,7 @@ class SystemUserViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
-
         if not is_staff_request(request):
-
             return Response(
                 {
                     "detail": (
@@ -2509,10 +2248,8 @@ class SystemUserViewSet(viewsets.ModelViewSet):
             )
 
         data = request.data
-
         email = str(
-            data.get("email")
-            or ""
+            data.get("email") or ""
         ).strip().lower()
 
         raw_password = (
@@ -2546,29 +2283,18 @@ class SystemUserViewSet(viewsets.ModelViewSet):
             else generate_id("user")
         )
 
-        # ----------------------------------------------------
-        # FIND EXISTING USER
-        # ----------------------------------------------------
-
         user = None
-
         if email:
-
             user = (
                 User.objects
-                .filter(
-                    email__iexact=email
-                )
+                .filter(email__iexact=email)
                 .first()
             )
 
         if not user:
-
             user = (
                 User.objects
-                .filter(
-                    username__iexact=username
-                )
+                .filter(username__iexact=username)
                 .first()
             )
 
@@ -2577,29 +2303,16 @@ class SystemUserViewSet(viewsets.ModelViewSet):
             default=True,
         )
 
-        # ----------------------------------------------------
-        # CREATE / UPDATE USER
-        # ----------------------------------------------------
-
         if user:
-
             user.first_name = name
-
             if email:
                 user.email = email
-
             if raw_password:
-                user.set_password(
-                    raw_password
-                )
-
+                user.set_password(raw_password)
             user.is_staff = True
             user.is_active = is_active
-
             user.save()
-
         else:
-
             user = User.objects.create_user(
                 username=username,
                 email=email,
@@ -2609,46 +2322,32 @@ class SystemUserViewSet(viewsets.ModelViewSet):
                 is_active=is_active,
             )
 
-        # ----------------------------------------------------
-        # ROLE
-        # ----------------------------------------------------
-
         role_obj = (
             Role.objects
-            .filter(
-                name__iexact=role_name
-            )
+            .filter(name__iexact=role_name)
             .first()
         )
 
         if not role_obj:
-
             role_obj = (
                 Role.objects
-                .filter(
-                    role_id__iexact=role_name
-                )
+                .filter(role_id__iexact=role_name)
                 .first()
             )
 
         if not role_obj:
-
             role_obj = (
                 Role.objects
-                .filter(
-                    name__icontains=role_name
-                )
+                .filter(name__icontains=role_name)
                 .first()
             )
 
         if not role_obj:
-
             role_id_clean = (
                 role_name
                 .lower()
                 .replace(" ", "-")
             )
-
             role_obj, _ = (
                 Role.objects
                 .get_or_create(
@@ -2661,33 +2360,21 @@ class SystemUserViewSet(viewsets.ModelViewSet):
                 )
             )
 
-        # ----------------------------------------------------
-        # PROFILE
-        # ----------------------------------------------------
-
         profile, _ = (
             UserProfile.objects
-            .get_or_create(
-                user=user
-            )
+            .get_or_create(user=user)
         )
-
         profile.role = role_obj
         profile.save()
 
-        serializer = self.get_serializer(
-            user
-        )
-
+        serializer = self.get_serializer(user)
         return Response(
             serializer.data,
             status=status.HTTP_201_CREATED,
         )
 
     def destroy(self, request, *args, **kwargs):
-
         if not is_staff_request(request):
-
             return Response(
                 {
                     "detail": (
@@ -2700,7 +2387,6 @@ class SystemUserViewSet(viewsets.ModelViewSet):
             )
 
         user = self.get_object()
-
         user.is_active = False
         user.save(update_fields=["is_active"])
 
@@ -2720,17 +2406,9 @@ class SystemUserViewSet(viewsets.ModelViewSet):
 # ============================================================
 
 class CustomTimeSlotViewSet(viewsets.ModelViewSet):
-
-    queryset = (
-        CustomTimeSlot.objects
-        .all()
-    )
-
+    queryset = CustomTimeSlot.objects.all()
     serializer_class = CustomTimeSlotSerializer
-    permission_classes = [
-        IsAuthenticatedOrReadOnly
-    ]
-
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "slot_id"
 
 
@@ -2739,125 +2417,81 @@ class CustomTimeSlotViewSet(viewsets.ModelViewSet):
 # ============================================================
 
 class RoleViewSet(viewsets.ModelViewSet):
-
     queryset = Role.objects.all()
     serializer_class = RoleSerializer
-    permission_classes = [
-        IsAuthenticatedOrReadOnly
-    ]
-
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "role_id"
 
     def get_object(self):
-
         lookup_url_kwarg = (
             self.lookup_url_kwarg
             or self.lookup_field
         )
-
-        value = str(
-            self.kwargs[
-                lookup_url_kwarg
-            ]
-        ).strip()
+        value = str(self.kwargs[lookup_url_kwarg]).strip()
 
         role = (
             Role.objects
-            .filter(
-                role_id=value
-            )
+            .filter(role_id=value)
             .first()
         )
 
         if not role:
-
             role = (
                 Role.objects
-                .filter(
-                    name__iexact=value
-                )
+                .filter(name__iexact=value)
                 .first()
             )
 
         if not role:
-
             from django.http import Http404
-
-            raise Http404(
-                "Role not found."
-            )
+            raise Http404("Role not found.")
 
         self.check_object_permissions(
             self.request,
             role,
         )
-
         return role
 
     def create(self, request, *args, **kwargs):
-
         role_id = (
             request.data.get("role_id")
             or request.data.get("id")
         )
-
         name = request.data.get("name")
 
         if role_id:
-
             existing = (
                 Role.objects
-                .filter(
-                    role_id=role_id
-                )
+                .filter(role_id=role_id)
                 .first()
             )
-
             if existing:
-
                 serializer = self.get_serializer(
                     existing,
                     data=request.data,
                     partial=True,
                 )
-
-                serializer.is_valid(
-                    raise_exception=True
-                )
-
+                serializer.is_valid(raise_exception=True)
                 serializer.save()
-
                 return Response(
                     serializer.data,
                     status=status.HTTP_200_OK,
                 )
 
         if name:
-
             existing = (
                 Role.objects
-                .filter(
-                    name__iexact=str(
-                        name
-                    ).strip()
-                )
+                .filter(name__iexact=str(name).strip())
                 .first()
             )
-
             if existing:
-
                 serializer = self.get_serializer(
                     existing,
                     data=request.data,
                     partial=True,
                 )
-
-                serializer.is_valid(
-                    raise_exception=True
-                )
-
+                serializer.is_valid(raise_exception=True)
                 serializer.save()
-
                 return Response(
                     serializer.data,
                     status=status.HTTP_200_OK,
@@ -2875,15 +2509,11 @@ class RoleViewSet(viewsets.ModelViewSet):
 # ============================================================
 
 class AiReportView(APIView):
-
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-
         prompt = str(
-            request.data.get(
-                "prompt"
-            )
+            request.data.get("prompt")
             or "Generate Full Executive Board Report"
         ).strip()
 
@@ -2894,115 +2524,64 @@ class AiReportView(APIView):
         )
 
         total = active.count()
-
-        checked_in = (
-            active
-            .filter(status="Checked In")
-            .count()
-        )
-
-        completed = (
-            active
-            .filter(status="Completed")
-            .count()
-        )
-
+        checked_in = active.filter(status="Checked In").count()
+        completed = active.filter(status="Completed").count()
         pending_hmo = (
             active
-            .filter(
-                payment_type="HMO Insurance"
-            )
-            .exclude(
-                hmo_status="Approved"
-            )
+            .filter(payment_type="HMO Insurance")
+            .exclude(hmo_status="Approved")
             .count()
         )
-
         pending_cash = (
             active
-            .filter(
-                payment_type="Private Self-Pay"
-            )
-            .exclude(
-                payment_status="Cleared"
-            )
+            .filter(payment_type="Private Self-Pay")
+            .exclude(payment_status="Cleared")
             .count()
         )
 
         departments = list(
             Department.objects
             .filter(status=True)
-            .values(
-                "name",
-                "dept_id",
-            )
+            .values("name", "dept_id")
         )
 
         doctors = list(
             Doctor.objects
             .filter(status=True)
-            .values(
-                "doc_id",
-                "name",
-                "full_name",
-                "specialty",
-            )
+            .values("doc_id", "name", "full_name", "specialty")
         )
 
         top = (
             active
             .values("doctor_specialty")
-            .annotate(
-                n=Count("ref_code")
-            )
+            .annotate(n=Count("ref_code"))
             .order_by("-n")
             .first()
         )
 
         generated_at = (
-            timezone.localtime(
-                timezone.now()
-            ).isoformat()
+            timezone.localtime(timezone.now()).isoformat()
         )
 
         report = (
             "ISALU HOSPITALS - "
             "BACKEND GENERATED EXECUTIVE REPORT\n"
-
             f"Generated: {generated_at}\n"
-
             f"Query: {prompt}\n\n"
-
             "HOSPITAL METRICS\n"
-
             f"- Active bookings: {total}\n"
-
             f"- Checked in: {checked_in}\n"
-
             f"- Completed: {completed}\n"
-
             f"- Pending HMO: {pending_hmo}\n"
-
             f"- Pending cashdesk: {pending_cash}\n"
-
-            f"- Active departments: "
-            f"{len(departments)}\n"
-
-            f"- Active doctors: "
-            f"{len(doctors)}\n"
-
+            f"- Active departments: {len(departments)}\n"
+            f"- Active doctors: {len(doctors)}\n"
             f"- Top specialty by booking volume: "
             f"{(top or {}).get('doctor_specialty') or 'N/A'}\n\n"
-
             "RECOMMENDATIONS\n"
-
             "- Review pending HMO authorizations promptly.\n"
-
-            "- Monitor cashdesk clearance before "
-            "completing consultations.\n"
-
-            "- Use server-side schedule capacity as "
-            "the authoritative availability source.\n"
+            "- Monitor cashdesk clearance before completing consultations.\n"
+            "- Use server-side schedule capacity as the authoritative availability source.\n"
         )
 
         return Response(
@@ -3019,15 +2598,9 @@ class AiReportView(APIView):
 # ============================================================
 
 class AppSettingViewSet(viewsets.ModelViewSet):
-
     queryset = AppSetting.objects.all()
-
     serializer_class = AppSettingSerializer
-
-    permission_classes = [
-        IsAuthenticatedOrReadOnly
-    ]
-
+    permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "key"
 
 
@@ -3037,12 +2610,10 @@ class AppSettingViewSet(viewsets.ModelViewSet):
 
 @method_decorator(csrf_exempt, name="dispatch")
 class CustomTokenRefreshView(APIView):
-
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def post(self, request):
-
         refresh_token = str(
             request.data.get("refresh")
             or request.data.get("refresh_token")
@@ -3050,113 +2621,61 @@ class CustomTokenRefreshView(APIView):
         ).strip()
 
         if not refresh_token:
-
             return Response(
                 {
-                    "error": (
-                        "Refresh token is required."
-                    )
+                    "error": "Refresh token is required."
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
-
-            refresh = RefreshToken(
-                refresh_token
-            )
-
+            refresh = RefreshToken(refresh_token)
             return Response(
                 {
-                    "access": str(
-                        refresh.access_token
-                    ),
-
-                    "refresh": str(
-                        refresh
-                    ),
-
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
                     "expires_in": 86400,
                 },
                 status=status.HTTP_200_OK,
             )
-
         except Exception:
-
             return Response(
                 {
-                    "error": (
-                        "Invalid or expired refresh token."
-                    )
+                    "error": "Invalid or expired refresh token."
                 },
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
 
 # ============================================================
-# HOSPITAL EVENT STREAM
+# HOSPITAL EVENT STREAM (FALLBACK SSE COMPATIBILITY)
 # ============================================================
 
 @method_decorator(csrf_exempt, name="dispatch")
 class HospitalEventStreamView(APIView):
-
     permission_classes = [AllowAny]
     authentication_classes = []
 
     def get(self, request):
-
         def event_stream():
-
-            # IMPORTANT:
-            # Do NOT manually place JSON braces inside
-            # an f-string.
-            #
-            # json.dumps() prevents:
-            # SyntaxError: f-string: single '}' is not allowed
-
             connected_event = {
                 "type": "CONNECTED",
-                "timestamp": int(
-                    time.time() * 1000
-                ),
+                "timestamp": int(time.time() * 1000),
             }
-
-            yield (
-                "data: "
-                + json.dumps(
-                    connected_event
-                )
-                + "\n\n"
-            )
+            yield "data: " + json.dumps(connected_event) + "\n\n"
 
             for _ in range(3):
-
                 time.sleep(5)
-
                 heartbeat_event = {
                     "type": "HEARTBEAT",
-                    "timestamp": int(
-                        time.time() * 1000
-                    ),
+                    "timestamp": int(time.time() * 1000),
                 }
-
-                yield (
-                    "data: "
-                    + json.dumps(
-                        heartbeat_event
-                    )
-                    + "\n\n"
-                )
+                yield "data: " + json.dumps(heartbeat_event) + "\n\n"
 
         response = StreamingHttpResponse(
             event_stream(),
             content_type="text/event-stream",
         )
-
-        response["Cache-Control"] = (
-            "no-cache"
-        )
-
+        response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
-
         return response

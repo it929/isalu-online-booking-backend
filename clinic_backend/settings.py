@@ -17,12 +17,15 @@ ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 
 # Application definition
 INSTALLED_APPS = [
+    "daphne",
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+
+    "channels",
     
     # Third party packages
     'rest_framework',
@@ -63,6 +66,28 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'clinic_backend.wsgi.application'
+ASGI_APPLICATION = 'clinic_backend.asgi.application'
+
+# In backend/clinic_backend/settings.py
+
+# Detect if Redis is explicitly configured; otherwise fall back to in-memory for Windows
+REDIS_HOST = os.getenv('REDIS_HOST', None)
+
+if REDIS_HOST:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels_redis.core.RedisChannelLayer",
+            "CONFIG": {
+                "hosts": [(REDIS_HOST, int(os.getenv("REDIS_PORT", 6379)))],
+            },
+        },
+    }
+else:
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer",
+        },
+    }
 
 # Database
 DATABASES = {
