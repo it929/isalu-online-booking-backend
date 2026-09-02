@@ -1190,6 +1190,34 @@ class BookingSerializer(serializers.ModelSerializer):
                         )
                     })
 
+                # ----------------------------------------------------
+                # ALTERNATING-WEEK RECURRENCE
+                #
+                # day_configs = {"Sat": {"weeks": [1, 3]}} limits the
+                # doctor to the 1st and 3rd Saturday of each month.
+                # Absent or empty `weeks` means every occurrence.
+                # ----------------------------------------------------
+                day_cfg = (sched_obj.day_configs or {})
+                cfg = day_cfg.get(day_short) or day_cfg.get(day_name) or {}
+                weeks = cfg.get("weeks") or []
+                if weeks:
+                    occurrence = (parsed_date.day - 1) // 7 + 1
+                    if occurrence not in weeks:
+                        ordinals = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th", 5: "5th"}
+                        allowed = " & ".join(
+                            ordinals.get(w, f"{w}th") for w in sorted(weeks)
+                        )
+                        raise serializers.ValidationError({
+                            "error": (
+                                "Doctor schedule unavailable: "
+                                f"{doc_obj.full_name or doc_obj.name} "
+                                f"is only available on the {allowed} {day_name} "
+                                f"of each month. The date you selected is the "
+                                f"{ordinals.get(occurrence, str(occurrence))} "
+                                f"{day_name}."
+                            )
+                        })
+
         # ========================================================
         # DAILY CAPACITY
         #
@@ -2525,3 +2553,22 @@ class AppSettingSerializer(
     class Meta:
         model = AppSetting
         fields = "__all__"
+
+
+class BookingListSerializer(BookingSerializer):
+    """
+    List view serializer. Excludes the base64 referral document blobs,
+    which pushed the list response to ~21MB and prevented the admin
+    dashboard from rendering. Documents remain available on detail retrieve.
+    """
+    class Meta(BookingSerializer.Meta):
+        exclude = ("referral_doc_data", "referral_doc_text")
+        fields = None
+
+    def to_representation(self, instance):
+        # The parent adds camelCase aliases in to_representation, so the
+        # Meta.exclude above cannot remove them. Strip them here.
+        data = super().to_representation(instance)
+        data.pop("referralDocData", None)
+        data.pop("referralDocText", None)
+        return data

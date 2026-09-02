@@ -43,6 +43,7 @@ from .serializers import (
     DoctorSerializer,
     SpecialistScheduleSerializer,
     BookingSerializer,
+    BookingListSerializer,
     HmoCompanySerializer,
     SystemUserSerializer,
     CustomTimeSlotSerializer,
@@ -578,6 +579,95 @@ class DoctorViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'doc_id'
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="available-dates",
+        permission_classes=[AllowAny],
+    )
+    def available_dates(self, request, *args, **kwargs):
+        """
+        Dates this doctor can actually be booked on.
+
+        Applies duty_days plus any alternating-week recurrence held in
+        day_configs, e.g. {"Sat": {"weeks": [1, 3]}} for a doctor who
+        works only the 1st and 3rd Saturday of each month.
+
+        Query params:
+            days  how many days ahead to return (default 90, max 365)
+            from  ISO start date (default today)
+        """
+        import datetime
+
+        doctor = self.get_object()
+
+        try:
+            days_ahead = int(request.query_params.get("days", 90))
+        except (TypeError, ValueError):
+            days_ahead = 90
+        days_ahead = max(1, min(days_ahead, 365))
+
+        raw_from = request.query_params.get("from")
+        try:
+            start = (
+                datetime.date.fromisoformat(raw_from)
+                if raw_from else datetime.date.today()
+            )
+        except ValueError:
+            start = datetime.date.today()
+
+        schedules = [
+            s for s in doctor.schedules.all()
+            if getattr(s, "status", True)
+        ]
+
+        dates = []
+        for offset in range(days_ahead):
+            day = start + datetime.timedelta(days=offset)
+            day_name = day.strftime("%A")
+            day_short = day.strftime("%a")
+
+            for sched in schedules:
+                duty_days = sched.duty_days or []
+                if not duty_days:
+                    continue
+
+                tokens = [
+                    str(x).strip().lower()
+                    for x in duty_days
+                    if str(x).strip()
+                ]
+                on_this_weekday = any(
+                    t == day_name.lower()
+                    or t == day_short.lower()
+                    or day_name.lower().startswith(t)
+                    for t in tokens
+                )
+                if not on_this_weekday:
+                    continue
+
+                configs = sched.day_configs or {}
+                cfg = (
+                    configs.get(day_short)
+                    or configs.get(day_name)
+                    or {}
+                )
+                weeks = cfg.get("weeks") or []
+                if weeks:
+                    occurrence = (day.day - 1) // 7 + 1
+                    if occurrence not in weeks:
+                        continue
+
+                dates.append(day.isoformat())
+                break
+
+        return Response({
+            "doctor_id": getattr(doctor, "doc_id", None),
+            "from": start.isoformat(),
+            "days": days_ahead,
+            "dates": dates,
+        })
 
     def get_queryset(self):
 
@@ -1447,6 +1537,14 @@ class BookingViewSet(viewsets.ModelViewSet):
     serializer_class = BookingSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = "ref_code"
+
+    def get_serializer_class(self):
+        # The list response previously included base64 referral documents
+        # (~21MB), which prevented the admin dashboard from rendering.
+        # Documents are still returned on detail retrieve.
+        if self.action == "list":
+            return BookingListSerializer
+        return BookingSerializer
 
     def get_permissions(self):
 
