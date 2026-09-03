@@ -1697,6 +1697,48 @@ class BookingViewSet(viewsets.ModelViewSet):
         return response
 
     @action(
+        detail=True,
+        methods=["post"],
+        url_path="send-reminder",
+    )
+    def send_reminder(self, request, ref_code=None):
+        """Sends Email and SMS reminder to patient for a single appointment."""
+        booking = self.get_object()
+        force = request.data.get("force", False)
+
+        from api.notification_service import send_single_booking_reminder
+        res = send_single_booking_reminder(booking, force=force)
+
+        # Real-time WebSocket event
+        broadcast_booking_update(
+            booking,
+            event_type="REMINDER_SENT",
+            message=f"Reminder sent to {booking.patient_name} ({booking.ref_code})."
+        )
+
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="send-bulk-reminders",
+    )
+    def send_bulk_reminders(self, request):
+        """Triggers bulk Email + SMS reminders for upcoming appointments."""
+        target_date = request.data.get("target_date") or request.data.get("date")
+        days_ahead = int(request.data.get("days_ahead", 1))
+        force = request.data.get("force", False)
+
+        from api.notification_service import process_appointment_reminders
+        summary = process_appointment_reminders(
+            target_date=target_date,
+            days_ahead=days_ahead,
+            force=force
+        )
+
+        return Response(summary, status=status.HTTP_200_OK)
+
+    @action(
         detail=False,
         methods=["get"],
         url_path="summary",

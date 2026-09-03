@@ -6,6 +6,11 @@ Generated for Isalu Hospitals Medical Booking Platform.
 from pathlib import Path
 from datetime import timedelta
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -174,3 +179,34 @@ MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# =========================================================
+# =========================================================
+# EMAIL SMTP CONFIGURATION (FOR PATIENT REMINDERS & NOTIFICATIONS)
+# =========================================================
+_email_user = os.getenv('EMAIL_HOST_USER', '').strip()
+_email_backend_env = os.getenv('EMAIL_BACKEND', '').strip()
+
+if _email_backend_env:
+    EMAIL_BACKEND = _email_backend_env
+elif _email_user and not _email_user.startswith("your-"):
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+else:
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', 587))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1')
+EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'False').lower() in ('true', '1')
+EMAIL_HOST_USER = _email_user
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', f"Isalu Hospitals <{_email_user or 'no-reply@isalu.ng'}>")
+
+# =========================================================
+# SMS GATEWAY CONFIGURATION (EBULKSMS.COM API)
+# =========================================================
+EBULKSMS_USERNAME = os.getenv('EBULKSMS_USERNAME', '').strip()
+EBULKSMS_API_KEY = os.getenv('EBULKSMS_API_KEY', '').strip()
+EBULKSMS_SENDER_ID = os.getenv('EBULKSMS_SENDER_ID', 'ISALU').strip()
+EBULKSMS_API_URL = os.getenv('EBULKSMS_API_URL', 'https://api.ebulksms.com/sendsms.json').strip()
+
