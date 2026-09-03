@@ -73,25 +73,49 @@ TEMPLATES = [
 WSGI_APPLICATION = 'clinic_backend.wsgi.application'
 ASGI_APPLICATION = 'clinic_backend.asgi.application'
 
-# In backend/clinic_backend/settings.py
+# =========================================================
+# REDIS & ASYNC CHANNEL LAYER CONFIGURATION (PRODUCTION READY)
+# =========================================================
+REDIS_URL = os.getenv('REDIS_URL', '').strip()
+REDIS_HOST = os.getenv('REDIS_HOST', '').strip()
+REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', '').strip()
 
-# Detect if Redis is explicitly configured; otherwise fall back to in-memory for Windows
-REDIS_HOST = os.getenv('REDIS_HOST', None)
+if REDIS_URL:
+    redis_hosts = [REDIS_URL]
+elif REDIS_HOST:
+    if REDIS_PASSWORD:
+        redis_hosts = [f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"]
+    else:
+        redis_hosts = [(REDIS_HOST, REDIS_PORT)]
+else:
+    redis_hosts = None
 
-if REDIS_HOST:
+if redis_hosts:
     CHANNEL_LAYERS = {
         "default": {
             "BACKEND": "channels_redis.core.RedisChannelLayer",
             "CONFIG": {
-                "hosts": [(REDIS_HOST, int(os.getenv("REDIS_PORT", 6379)))],
+                "hosts": redis_hosts,
             },
         },
+    }
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL or (f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0" if REDIS_PASSWORD else f"redis://{REDIS_HOST}:{REDIS_PORT}/0"),
+        }
     }
 else:
     CHANNEL_LAYERS = {
         "default": {
             "BACKEND": "channels.layers.InMemoryChannelLayer",
         },
+    }
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
     }
 
 # Database
