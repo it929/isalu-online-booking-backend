@@ -1421,14 +1421,14 @@ class BookingSerializer(serializers.ModelSerializer):
                         / 60.0
                     )
 
-                    if time_diff_minutes < 30:
+                    if time_diff_minutes < 10:
 
                         raise serializers.ValidationError({
                             "error": (
                                 "Same-Day Cutoff Restriction: "
                                 "Online bookings for today's "
                                 "clinic must be placed at least "
-                                "30 minutes prior to the appointment "
+                                "10 minutes prior to the appointment "
                                 "time. Please select a future time "
                                 "or contact hospital reception."
                             )
