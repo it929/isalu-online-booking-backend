@@ -1,5 +1,3 @@
-# api/views.py
-
 import json
 import random
 import time
@@ -190,6 +188,159 @@ def safe_int(value, default=0, minimum=None):
     return result
 
 
+def is_token_matching_day(token, day_name, day_short, occurrence):
+    t = str(token).strip().lower()
+    if not t:
+        return False
+
+    dn = day_name.lower()
+    ds = day_short.lower()
+
+    # Check if weekday is mentioned in token
+    has_weekday = (
+        dn in t
+        or ds in t
+        or t == dn
+        or t == ds
+        or dn.startswith(t)
+        or ds.startswith(t)
+    )
+    if not has_weekday:
+        return False
+
+    # Check week occurrence constraints embedded in duty token text
+    if "1st & 3rd" in t or "1st and 3rd" in t or "1st &3rd" in t:
+        return occurrence in (1, 3)
+    if "2nd & 4th" in t or "2nd and 4th" in t or "2nd &4th" in t:
+        return occurrence in (2, 4)
+    if "1st - 3rd" in t or "1st-3rd" in t or "1st to 3rd" in t:
+        return occurrence in (1, 2, 3)
+    if "1st" in t and not any(x in t for x in ("3rd", "2nd", "4th", "5th")):
+        return occurrence == 1
+    if "2nd" in t and not any(x in t for x in ("1st", "3rd", "4th", "5th")):
+        return occurrence == 2
+    if "3rd" in t and not any(x in t for x in ("1st", "2nd", "4th", "5th")):
+        return occurrence == 3
+    if "4th" in t and not any(x in t for x in ("1st", "2nd", "3rd", "5th")):
+        return occurrence == 4
+    if "5th" in t and not any(x in t for x in ("1st", "2nd", "3rd", "4th")):
+        return occurrence == 5
+
+    return True
+
+
+def resolve_day_schedule(doctor, appointment_date):
+    """
+    Resolve a doctor's schedule for one calendar date.
+
+    Honours duty_days, day_configs["weeks"] (alternating-week recurrence)
+    and per-day capacity overrides, so every endpoint reports the same
+    capacity the BookingSerializer actually enforces.
+    """
+    day_name = appointment_date.strftime("%A")
+    day_short = appointment_date.strftime("%a")
+    occurrence = (appointment_date.day - 1) // 7 + 1
+
+    schedules = [
+        s for s in doctor.schedules.all()
+        if getattr(s, "status", True)
+    ]
+
+    if not schedules:
+        doc_days = doctor.available_days or []
+        on_duty = True
+        if doc_days:
+            on_duty = any(
+                is_token_matching_day(d, day_name, day_short, occurrence)
+                for d in doc_days
+            )
+        capacity = getattr(doctor, "capacity", 15) or 15
+        return {
+            "schedule": None,
+            "capacity": safe_int(capacity, default=15, minimum=0),
+            "on_duty": on_duty,
+            "config": {},
+            "has_schedule": False,
+        }
+
+    for sched in schedules:
+        duty_tokens = [
+            str(x).strip()
+            for x in (sched.duty_days or [])
+            if str(x).strip()
+        ]
+        if duty_tokens:
+            on_weekday = any(
+                is_token_matching_day(t, day_name, day_short, occurrence)
+                for t in duty_tokens
+            )
+            if not on_weekday:
+                continue
+
+        configs = sched.day_configs or {}
+        cfg = configs.get(day_short) or configs.get(day_name) or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        weeks = cfg.get("weeks") or []
+        if weeks and occurrence not in weeks:
+            continue
+
+        capacity = safe_int(sched.capacity, default=15, minimum=0)
+        if cfg.get("capacity") not in (None, ""):
+            capacity = safe_int(cfg.get("capacity"), default=capacity, minimum=0)
+
+        return {
+            "schedule": sched,
+            "capacity": capacity,
+            "on_duty": True,
+            "config": cfg,
+            "has_schedule": True,
+        }
+
+    return {
+        "schedule": schedules[0],
+        "capacity": safe_int(schedules[0].capacity, default=15, minimum=0),
+        "on_duty": False,
+        "config": {},
+        "has_schedule": True,
+    }
+
+
+def count_active_bookings(doctor, date_str=None, date_range=None):
+    """
+    Count live bookings for a doctor. Booking.doctor_id may hold either
+    Doctor.doc_id or the numeric pk depending on which client wrote it.
+    """
+    doc_pk = getattr(doctor, "doc_id", None) or getattr(doctor, "id", None) or ""
+    doctor_ids = [
+        str(doc_pk).strip(),
+    ]
+    doctor_ids = [x for x in doctor_ids if x]
+    doc_name = str(doctor.full_name or doctor.name or "").strip()
+
+    filter_q = Q(doctor_id__in=doctor_ids)
+    if doc_name:
+        filter_q |= Q(doctor_name__icontains=doc_name)
+
+    qs = (
+        Booking.objects
+        .filter(filter_q)
+        .filter(is_active=True)
+        .exclude(status__iexact="Disabled")
+        .exclude(status__iexact="Cancelled")
+    )
+    if date_str:
+        return qs.filter(date=date_str).count()
+    if date_range:
+        start, end = date_range
+        return (
+            qs.filter(date__gte=start.isoformat(), date__lte=end.isoformat())
+            .values("date")
+            .annotate(n=Count("ref_code"))
+        )
+    return qs.count()
+
 def generate_id(prefix):
     """
     Generate a frontend-friendly unique ID.
@@ -267,7 +418,6 @@ def get_doctor_name(doctor):
 
     return (
         doctor.full_name
-        or doctor.name
         or doctor.acronym
         or "Specialist Doctor"
     )
@@ -617,11 +767,28 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 # ============================================================
 # DOCTOR
 # ============================================================
-
 class DoctorViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorSerializer
     permission_classes = [IsAuthenticatedOrReadOnly]
     lookup_field = 'doc_id'
+
+    def get_object(self):
+        queryset = self.filter_queryset(self.get_queryset())
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        val = self.kwargs.get(lookup_url_kwarg)
+        if not val:
+            return super().get_object()
+
+        filter_q = Q(doc_id=val)
+        if str(val).isdigit():
+            filter_q |= Q(id=int(val))
+
+        obj = queryset.filter(filter_q).first()
+        if not obj:
+            from django.http import Http404
+            raise Http404(f"No Doctor matches the given query {val}.")
+        self.check_object_permissions(self.request, obj)
+        return obj
 
     @action(
         detail=True,
@@ -647,56 +814,66 @@ class DoctorViewSet(viewsets.ModelViewSet):
         except ValueError:
             start = datetime.date.today()
 
-        schedules = [
+        end = start + datetime.timedelta(days=days_ahead - 1)
+
+        booked_map = {
+            str(row["date"]): row["n"]
+            for row in count_active_bookings(doctor, date_range=(start, end))
+        }
+
+        schedule_count = len([
             s for s in doctor.schedules.all()
             if getattr(s, "status", True)
-        ]
+        ])
 
         dates = []
+        availability_details = []
+
         for offset in range(days_ahead):
             day = start + datetime.timedelta(days=offset)
-            day_name = day.strftime("%A")
-            day_short = day.strftime("%a")
+            date_str = day.isoformat()
 
-            for sched in schedules:
-                duty_days = sched.duty_days or []
-                if not duty_days:
-                    continue
+            resolved = resolve_day_schedule(doctor, day)
+            capacity = resolved["capacity"]
+            booked = booked_map.get(date_str, 0)
+            remaining = max(0, capacity - booked)
+            is_full = booked >= capacity
+            on_duty = bool(resolved["on_duty"])
 
-                tokens = [
-                    str(x).strip().lower()
-                    for x in duty_days
-                    if str(x).strip()
-                ]
-                on_this_weekday = any(
-                    t == day_name.lower()
-                    or t == day_short.lower()
-                    or day_name.lower().startswith(t)
-                    for t in tokens
-                )
-                if not on_this_weekday:
-                    continue
+            cfg = resolved["config"] or {}
+            shift_times = cfg.get("shiftTimes") or cfg.get("shift_times") or []
+            if isinstance(shift_times, str):
+                shift_times = [shift_times]
+            time_window = ", ".join(str(t) for t in shift_times if t)
+            if not time_window and resolved["schedule"]:
+                time_window = resolved["schedule"].shift_time or ""
 
-                configs = sched.day_configs or {}
-                cfg = (
-                    configs.get(day_short)
-                    or configs.get(day_name)
-                    or {}
-                )
-                weeks = cfg.get("weeks") or []
-                if weeks:
-                    occurrence = (day.day - 1) // 7 + 1
-                    if occurrence not in weeks:
-                        continue
+            if on_duty:
+                dates.append(date_str)
 
-                dates.append(day.isoformat())
-                break
+            availability_details.append({
+                "date": date_str,
+                "day": day.strftime("%A"),
+                "booked": booked,
+                "capacity": capacity,
+                "remaining": remaining,
+                "is_full": is_full,
+                "isFull": is_full,
+                "on_duty": on_duty,
+                "onDuty": on_duty,
+                "time_window": time_window,
+                "timeWindow": time_window,
+                "available": (not is_full) and bool(doctor.status) and on_duty,
+            })
 
         return Response({
             "doctor_id": getattr(doctor, "doc_id", None),
+            "doctor_status": bool(doctor.status),
+            "schedule_count": schedule_count,
             "from": start.isoformat(),
             "days": days_ahead,
             "dates": dates,
+            "availability": availability_details,
         })
 
     def get_queryset(self):
@@ -1013,7 +1190,6 @@ class DoctorViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED
         )
 
-
 # ============================================================
 # SPECIALIST SCHEDULE
 # ============================================================
@@ -1319,7 +1495,7 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
 
 class BookingViewSet(viewsets.ModelViewSet):
     serializer_class = BookingSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [AllowAny]
     lookup_field = "ref_code"
 
     def get_serializer_class(self):
@@ -1327,16 +1503,17 @@ class BookingViewSet(viewsets.ModelViewSet):
             return BookingListSerializer
         return BookingSerializer
 
-    def get_permissions(self):
-        if self.action in (
-            "create",
-            "retrieve",
-        ):
-            return [AllowAny()]
+    def perform_authentication(self, request):
+        try:
+            super().perform_authentication(request)
+        except Exception:
+            from django.contrib.auth.models import AnonymousUser
+            request.user = AnonymousUser()
 
-        return [
-            IsAuthenticatedOrReadOnly()
-        ]
+    def get_permissions(self):
+        if self.action in ("update", "partial_update", "destroy"):
+            return [IsAuthenticated()]
+        return [AllowAny()]
 
     def get_queryset(self):
         include_disabled = (
@@ -1663,71 +1840,24 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        schedule = (
-            SpecialistSchedule.objects
-            .filter(
-                doctor=doctor,
-                status=True,
-            )
-            .order_by("sched_id")
-            .first()
-        )
+        resolved = resolve_day_schedule(doctor, appointment_date)
+        capacity = resolved["capacity"]
+        on_duty = resolved["on_duty"]
 
-        capacity = (
-            schedule.capacity
-            if schedule
-            else 15
-        )
+        booked = count_active_bookings(doctor, date_str=date_str)
+        remaining = max(0, capacity - booked)
+        is_full = booked >= capacity
 
-        booked = (
-            Booking.objects
-            .filter(
-                doctor_id=doctor.doc_id,
-                date=date_str,
-                is_active=True,
-            )
-            .exclude(status="Disabled")
-            .count()
-        )
-
-        on_duty = True
-
-        if schedule and schedule.duty_days:
-            day_name = (
-                appointment_date.strftime("%A")
-            )
-            tokens = [
-                str(day).strip().lower()
-                for day in schedule.duty_days
-            ]
-            on_duty = any(
-                token == day_name.lower()
-                or day_name.lower().startswith(token)
-                for token in tokens
-            )
-
-        remaining = max(
-            0,
-            capacity - booked,
-        )
-
-        available = (
-            booked < capacity
-            and bool(doctor.status)
-            and on_duty
-        )
-
-        return Response(
-            {
-                "doctorId": doctor.doc_id,
-                "date": date_str,
-                "booked": booked,
-                "capacity": capacity,
-                "remaining": remaining,
-                "available": available,
-                "onDuty": on_duty,
-            }
-        )
+        return Response({
+            "doctorId": doctor.doc_id,
+            "date": date_str,
+            "booked": booked,
+            "capacity": capacity,
+            "remaining": remaining,
+            "is_full": is_full,
+            "available": (not is_full) and bool(doctor.status) and on_duty,
+            "onDuty": on_duty,
+        })
 
     @action(
         detail=False,
