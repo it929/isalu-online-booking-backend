@@ -445,6 +445,25 @@ class DoctorSerializer(serializers.ModelSerializer):
             ret["active_booking_count"]
         )
 
+        # ----------------------------------------------------
+        # Dynamic Capacity from SpecialistSchedule Table
+        # ----------------------------------------------------
+        cap = instance.daily_capacity
+        ret["capacity"] = cap
+        ret["daily_capacity"] = cap
+        ret["dailyCapacity"] = cap
+        ret["maxDailyAppointments"] = cap
+
+        schedule = instance.active_schedule
+        if schedule:
+            total_cap = schedule.total_weekly_capacity or (schedule.capacity * len(schedule.duty_days or [1]))
+            ret["total_weekly_capacity"] = total_cap
+            ret["totalWeeklyCapacity"] = total_cap
+            ret["day_configs"] = schedule.day_configs or {}
+            ret["dayConfigs"] = schedule.day_configs or {}
+            ret["shift_time"] = schedule.shift_time
+            ret["shiftTime"] = schedule.shift_time
+
         return ret
 
 
@@ -1233,66 +1252,12 @@ class BookingSerializer(serializers.ModelSerializer):
         # on that date, regardless of the selected time.
         # ========================================================
 
-        if sched_obj and parsed_date:
-
-            day_short = parsed_date.strftime("%a")
-
-            day_cfgs = sched_obj.day_configs or {}
-
+        if doc_obj and (parsed_date or date_str):
+            max_capacity = doc_obj.get_capacity_for_date(parsed_date or date_str)
+        elif sched_obj:
             max_capacity = sched_obj.capacity or 15
-
-            # ----------------------------------------------------
-            # DAY-SPECIFIC CAPACITY
-            # ----------------------------------------------------
-
-            day_config = day_cfgs.get(day_short)
-
-            if isinstance(day_config, dict):
-
-                configured_capacity = (
-                    day_config.get("capacity")
-                )
-
-                if configured_capacity not in (
-                    None,
-                    "",
-                ):
-
-                    try:
-
-                        max_capacity = int(
-                            configured_capacity
-                        )
-
-                    except (
-                        TypeError,
-                        ValueError,
-                    ):
-
-                        max_capacity = (
-                            sched_obj.capacity
-                            or 15
-                        )
-
-            # ----------------------------------------------------
-            # SAFETY
-            # ----------------------------------------------------
-
-            try:
-
-                max_capacity = int(
-                    max_capacity
-                )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
-
-                max_capacity = 15
-
-            if max_capacity < 0:
-                max_capacity = 0
+        else:
+            max_capacity = 15
 
             # ====================================================
             # COUNT EXISTING DAILY BOOKINGS
@@ -1506,67 +1471,7 @@ class BookingSerializer(serializers.ModelSerializer):
                 .first()
             )
 
-            max_capacity = 15
-
-            if schedule:
-
-                max_capacity = (
-                    schedule.capacity
-                    or 15
-                )
-
-                if date_str:
-
-                    try:
-
-                        parsed_date = (
-                            datetime.datetime
-                            .strptime(
-                                str(date_str),
-                                "%Y-%m-%d"
-                            )
-                            .date()
-                        )
-
-                        day_short = (
-                            parsed_date
-                            .strftime("%a")
-                        )
-
-                        day_config = (
-                            schedule.day_configs or {}
-                        ).get(day_short)
-
-                        if isinstance(
-                            day_config,
-                            dict
-                        ):
-
-                            configured_capacity = (
-                                day_config.get(
-                                    "capacity"
-                                )
-                            )
-
-                            if configured_capacity not in (
-                                None,
-                                "",
-                            ):
-
-                                try:
-
-                                    max_capacity = int(
-                                        configured_capacity
-                                    )
-
-                                except (
-                                    TypeError,
-                                    ValueError,
-                                ):
-                                    pass
-
-                    except ValueError:
-                        pass
+            max_capacity = doctor.get_capacity_for_date(date_str)
 
             # ----------------------------------------------------
             # FINAL DAILY CAPACITY CHECK

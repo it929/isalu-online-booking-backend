@@ -254,7 +254,7 @@ def resolve_day_schedule(doctor, appointment_date):
                 is_token_matching_day(d, day_name, day_short, occurrence)
                 for d in doc_days
             )
-        capacity = getattr(doctor, "capacity", 15) or 15
+        capacity = getattr(doctor, "daily_capacity", 15) or 15
         return {
             "schedule": None,
             "capacity": safe_int(capacity, default=15, minimum=0),

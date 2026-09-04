@@ -1,3 +1,4 @@
+import datetime
 from django.db import models
 from django.utils import timezone
 
@@ -477,9 +478,39 @@ class Doctor(models.Model):
         schedule = self.active_schedule
 
         if not schedule:
-            return 0
+            return 15
 
-        return max(int(schedule.capacity or 0), 0)
+        return max(int(schedule.capacity or 15), 0)
+
+    def get_capacity_for_date(self, date_val=None):
+        """
+        Returns the dynamic patient capacity for a specific date or day,
+        checking per-day config (day_configs) first, then schedule.capacity.
+        """
+        schedule = self.active_schedule
+        if not schedule:
+            return 15
+
+        if date_val:
+            try:
+                if isinstance(date_val, str):
+                    parsed_dt = datetime.datetime.strptime(date_val.strip(), "%Y-%m-%d").date()
+                elif isinstance(date_val, (datetime.date, datetime.datetime)):
+                    parsed_dt = date_val
+                else:
+                    parsed_dt = None
+
+                if parsed_dt:
+                    day_short = parsed_dt.strftime("%a")
+                    day_name = parsed_dt.strftime("%A")
+                    configs = schedule.day_configs or {}
+                    cfg = configs.get(day_short) or configs.get(day_name)
+                    if isinstance(cfg, dict) and cfg.get("capacity") not in (None, ""):
+                        return max(int(cfg.get("capacity")), 0)
+            except Exception:
+                pass
+
+        return max(int(schedule.capacity or 15), 0)
 
     def __str__(self):
         return (
