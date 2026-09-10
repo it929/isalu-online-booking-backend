@@ -13,7 +13,8 @@ from .views import (
     CustomTimeSlotViewSet,
     RoleViewSet,
     AiReportView,
-    AppSettingViewSet
+    AppSettingViewSet,
+    ClinicAnalyticsViewSet
 )
 
 router = DefaultRouter()
@@ -26,6 +27,7 @@ router.register(r'users', SystemUserViewSet, basename='systemuser')
 router.register(r'time-slots', CustomTimeSlotViewSet, basename='timeslot')
 router.register(r'roles', RoleViewSet, basename='role')
 router.register(r'settings', AppSettingViewSet, basename='setting')
+router.register(r'clinic-analytics', ClinicAnalyticsViewSet, basename='clinic-analytics')
 
 urlpatterns = [
     path('auth/staff-login/', StaffLoginView.as_view(), name='staff-login'),

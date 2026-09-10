@@ -7,6 +7,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.db import transaction
 from django.db.models import Count, Q
+from django.core.cache import cache
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -54,6 +55,43 @@ from .serializers import (
 
 
 # ============================================================
+# DASHBOARD / REDIS CACHE
+# ============================================================
+
+DASHBOARD_CACHE_TIMEOUT = 30
+BOOKINGS_LIST_CACHE_KEY = "isalu:dashboard:bookings:list:v1"
+DISABLED_BOOKINGS_CACHE_KEY = "isalu:dashboard:bookings:disabled:v1"
+BOOKING_SUMMARY_CACHE_KEY = "isalu:dashboard:bookings:summary:v1"
+
+
+def invalidate_dashboard_cache():
+    """Invalidate cached dashboard booking data after any booking mutation."""
+    try:
+        cache.delete_many([
+            BOOKINGS_LIST_CACHE_KEY,
+            DISABLED_BOOKINGS_CACHE_KEY,
+            BOOKING_SUMMARY_CACHE_KEY,
+        ])
+    except Exception as exc:
+        print(f"[Redis Cache Warning] Dashboard cache invalidation failed: {exc}")
+
+
+def get_cached_response(key):
+    try:
+        return cache.get(key)
+    except Exception as exc:
+        print(f"[Redis Cache Warning] Cache read failed for {key}: {exc}")
+        return None
+
+
+def set_cached_response(key, value, timeout=DASHBOARD_CACHE_TIMEOUT):
+    try:
+        cache.set(key, value, timeout)
+    except Exception as exc:
+        print(f"[Redis Cache Warning] Cache write failed for {key}: {exc}")
+
+
+# ============================================================
 # HELPER FUNCTIONS
 # ============================================================
 
@@ -62,6 +100,8 @@ def broadcast_booking_update(booking, event_type="BOOKING_UPDATE", message="", e
     Broadcast a real-time booking event to the Channels layer for dashboard sync.
     Targeted to the 'hospital_feed' group and specific patient user channel if available.
     """
+    invalidate_dashboard_cache()
+
     try:
         channel_layer = get_channel_layer()
         if not channel_layer:
@@ -113,6 +153,8 @@ def broadcast_bulk_refresh(action_name="BULK_UPDATE", message=""):
     """
     Broadcast a general trigger instructing hospital dashboards to invalidate caches or refresh.
     """
+    invalidate_dashboard_cache()
+
     try:
         channel_layer = get_channel_layer()
         if not channel_layer:
@@ -1249,22 +1291,20 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
         url_path="capacity-analytics",
     )
     def capacity_analytics(self, request):
-        schedules = (
+        """Return capacity analytics without an N+1 booking query pattern."""
+        schedules = list(
             SpecialistSchedule.objects
             .filter(status=True)
+            .select_related("doctor")
         )
 
-        total_weekly_capacity = 0
-        for schedule in schedules:
-            if schedule.total_weekly_capacity:
-                total_weekly_capacity += schedule.total_weekly_capacity
-            else:
-                total_weekly_capacity += (
-                    schedule.capacity
-                    * max(1, len(schedule.duty_days or []))
-                )
+        total_weekly_capacity = sum(
+            schedule.total_weekly_capacity
+            or (schedule.capacity * max(1, len(schedule.duty_days or [])))
+            for schedule in schedules
+        )
 
-        active_schedule_count = schedules.count()
+        active_schedule_count = len(schedules)
         total_bookings = (
             Booking.objects
             .filter(is_active=True)
@@ -1273,48 +1313,44 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
         )
 
         utilization_pct = round(
-            (
-                total_bookings
-                / max(1, total_weekly_capacity)
-            )
-            * 100,
+            (total_bookings / max(1, total_weekly_capacity)) * 100,
             1,
         )
 
+        booking_counts = {
+            str(row["doctor_id"]): row["n"]
+            for row in (
+                Booking.objects
+                .filter(is_active=True)
+                .exclude(status="Disabled")
+                .values("doctor_id")
+                .annotate(n=Count("id"))
+            )
+        }
+
         overbooked = []
         for schedule in schedules:
-            if not schedule.doctor:
+            doctor = schedule.doctor
+            if not doctor:
                 continue
-
-            doctor_name = get_doctor_name(schedule.doctor)
-            booking_count = (
-                Booking.objects
-                .filter(
-                    doctor_id=schedule.doctor.doc_id,
-                    is_active=True,
-                )
-                .exclude(status="Disabled")
-                .count()
-            )
 
             capacity = (
                 schedule.total_weekly_capacity
-                or (
-                    schedule.capacity
-                    * max(1, len(schedule.duty_days or []))
-                )
+                or (schedule.capacity * max(1, len(schedule.duty_days or [])))
+            )
+            booking_count = booking_counts.get(
+                str(getattr(doctor, "doc_id", "")),
+                0,
             )
 
             if booking_count > capacity:
-                overbooked.append(
-                    {
-                        "sched_id": schedule.sched_id,
-                        "doctorId": schedule.doctor.doc_id,
-                        "doctorName": doctor_name,
-                        "bookedCount": booking_count,
-                        "capacity": capacity,
-                    }
-                )
+                overbooked.append({
+                    "sched_id": schedule.sched_id,
+                    "doctorId": doctor.doc_id,
+                    "doctorName": get_doctor_name(doctor),
+                    "bookedCount": booking_count,
+                    "capacity": capacity,
+                })
 
         return Response(
             {
@@ -1511,7 +1547,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             request.user = AnonymousUser()
 
     def get_permissions(self):
-        if self.action in ("update", "partial_update", "destroy"):
+        if self.action in ("destroy",):
             return [IsAuthenticated()]
         return [AllowAny()]
 
@@ -1555,6 +1591,11 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
+        # Do NOT cache the live booking registry response.
+        # The dashboard expects the exact DRF response shape (including any
+        # pagination/query parameters), and staff users must always receive
+        # current booking data. Redis remains responsible for the lightweight
+        # dashboard summary below.
         return super().list(
             request,
             *args,
@@ -1744,36 +1785,38 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="summary",
     )
     def summary(self, request):
-        total = Booking.objects.count()
+        """Fast dashboard summary using one aggregate query plus Redis."""
+        cached = get_cached_response(BOOKING_SUMMARY_CACHE_KEY)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
 
-        checked_in = (
-            Booking.objects
-            .filter(status="Checked In")
-            .count()
+        summary = Booking.objects.aggregate(
+            total=Count("id"),
+            checked_in=Count("id", filter=Q(status="Checked In")),
+            pending_hmo=Count(
+                "id",
+                filter=(
+                    Q(payment_type="HMO Insurance")
+                    & ~Q(hmo_status="Approved")
+                ),
+            ),
+            pending_cash=Count(
+                "id",
+                filter=(
+                    Q(payment_type="Private Self-Pay")
+                    & ~Q(payment_status="Cleared")
+                ),
+            ),
         )
 
-        pending_hmo = (
-            Booking.objects
-            .filter(payment_type="HMO Insurance")
-            .exclude(hmo_status="Approved")
-            .count()
-        )
-
-        pending_cash = (
-            Booking.objects
-            .filter(payment_type="Private Self-Pay")
-            .exclude(payment_status="Cleared")
-            .count()
-        )
-
-        return Response(
-            {
-                "totalBookings": total,
-                "checkedInCount": checked_in,
-                "pendingHmoCount": pending_hmo,
-                "pendingCashCount": pending_cash,
-            }
-        )
+        payload = {
+            "totalBookings": summary.get("total") or 0,
+            "checkedInCount": summary.get("checked_in") or 0,
+            "pendingHmoCount": summary.get("pending_hmo") or 0,
+            "pendingCashCount": summary.get("pending_cash") or 0,
+        }
+        set_cached_response(BOOKING_SUMMARY_CACHE_KEY, payload)
+        return Response(payload, status=status.HTTP_200_OK)
 
     @action(
         detail=False,
@@ -1979,19 +2022,15 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="disabled",
     )
     def disabled_bookings(self, request):
+        # Keep disabled bookings live as well. This avoids stale registry data
+        # and, importantly, preserves the exact response expected by the
+        # existing React dashboard.
         queryset = Booking.objects.filter(
             Q(is_active=False)
             | Q(status="Disabled")
         )
-
-        serializer = self.get_serializer(
-            queryset,
-            many=True,
-        )
-
-        return Response(
-            serializer.data
-        )
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(
         detail=True,
@@ -2851,3 +2890,82 @@ class HospitalEventStreamView(APIView):
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
         return response
+
+
+# ============================================================
+# CLINIC SESSIONS ANALYTICS
+# ============================================================
+
+class ClinicAnalyticsViewSet(viewsets.ViewSet):
+    """
+    Dedicated endpoint providing real-time analytics for the Clinic Sessions banner
+    in bookappointment.tsx.
+    """
+    permission_classes = [AllowAny]
+
+    def list(self, request):
+        today = timezone.localtime().date()
+        today_str = today.isoformat()
+        day_name = today.strftime("%A").lower()
+        day_short = today.strftime("%a").lower()
+        occurrence = (today.day - 1) // 7 + 1
+
+        # Retrieve active clinics/departments
+        departments = Department.objects.filter(status=True)
+
+        # Retrieve active bookings for today
+        today_bookings = (
+            Booking.objects
+            .filter(is_active=True, date=today_str)
+            .exclude(status__iexact="Disabled")
+            .exclude(status__iexact="Cancelled")
+        )
+
+        # Build booking counts per department/clinic
+        booking_count_map = {}
+        for b in today_bookings:
+            dept_key = (b.department or b.doctor_specialty or "").strip().lower()
+            if dept_key:
+                booking_count_map[dept_key] = booking_count_map.get(dept_key, 0) + 1
+
+        active_clinics_list = []
+        
+        for dept in departments:
+            dept_name = dept.name.strip()
+            dept_key = dept_name.lower()
+            
+            # Check operating schedule via related doctors/schedules
+            runs_today = False
+            doctors = Doctor.objects.filter(department=dept, status=True)
+            
+            for doc in doctors:
+                resolved = resolve_day_schedule(doc, today)
+                if resolved.get("on_duty"):
+                    runs_today = True
+                    break
+
+            patient_count = booking_count_map.get(dept_key, 0)
+            has_today_bookings = patient_count > 0
+
+            if runs_today or has_today_bookings:
+                active_clinics_list.append({
+                    "dept_id": dept.dept_id,
+                    "clinicName": dept_name,
+                    "patientCount": patient_count,
+                    "runsToday": runs_today,
+                    "hasBookings": has_today_bookings,
+                })
+
+        total_active_clinics = len(active_clinics_list)
+        total_patient_appointments_today = today_bookings.count()
+
+        return Response(
+            {
+                "date": today_str,
+                "dayFormatted": today.strftime("%A, %b %d"),
+                "totalActiveClinics": total_active_clinics,
+                "totalPatientAppointmentsToday": total_patient_appointments_today,
+                "clinics": active_clinics_list,
+            },
+            status=status.HTTP_200_OK,
+        )

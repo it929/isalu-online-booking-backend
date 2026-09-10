@@ -16,9 +16,9 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 HOSPITAL_NAME = "Isalu Hospitals"
-HOSPITAL_ADDRESS = "1, Isalu Way, Ikeja, Lagos State, Nigeria"
+HOSPITAL_ADDRESS = "No. 46, Ijaiye Road (beside Tastee Fried Chicken and opposite Ogba Shopping Arcade / Caterpillar Bus Stop), Ogba, Ikeja, Lagos, Nigeria"
 HOSPITAL_PHONE = "+234 800 472 5800"
-HOSPITAL_EMAIL = "helpdesk@isalu.ng"
+HOSPITAL_EMAIL = "info@isaluhospitals.com"
 
 
 def format_booking_date_display(date_str: str) -> str:
@@ -52,10 +52,14 @@ def send_email_reminder(booking, is_3hour_notice: bool = False) -> tuple[bool, s
 
     if is_3hour_notice:
         subject = f"Urgent Reminder: Session Starts in 3 Hours at {HOSPITAL_NAME} [{ref_code}]"
-        time_heading = "TODAY in 3 Hours"
+        time_heading = f"today ({date_display}) in 3 hours"
+        badge_text = f"Appointment Today ({date_display})"
+        body_heading = f"today ({date_display}) in 3 hours"
     else:
-        subject = f"Appointment Reminder: Tomorrow at {HOSPITAL_NAME} [{ref_code}]"
-        time_heading = "Tomorrow"
+        subject = f"Appointment Reminder: Tomorrow ({date_display}) at {HOSPITAL_NAME} [{ref_code}]"
+        time_heading = f"tomorrow ({date_display})"
+        badge_text = f"Appointment Tomorrow ({date_display})"
+        body_heading = f"tomorrow ({date_display})"
 
     # Plain text version
     text_content = (
@@ -107,13 +111,13 @@ def send_email_reminder(booking, is_3hour_notice: bool = False) -> tuple[bool, s
         <div class="header">
           <h1>{HOSPITAL_NAME}</h1>
           <p>Official Patient Consultation Reminder</p>
-          <div class="badge">Appointment Tomorrow</div>
+          <div class="badge">{badge_text}</div>
         </div>
 
         <div class="content">
           <div class="greeting">Hello {patient_name},</div>
           <p style="font-size: 13px; line-height: 1.5; color: #334155;">
-            This is a friendly reminder for your scheduled doctor's consultation tomorrow. Here are your appointment details:
+            This is a friendly reminder for your scheduled doctor's consultation {body_heading}. Here are your appointment details:
           </p>
 
           <div class="ref-box">
