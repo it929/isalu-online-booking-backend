@@ -1546,10 +1546,22 @@ class BookingViewSet(viewsets.ModelViewSet):
             from django.contrib.auth.models import AnonymousUser
             request.user = AnonymousUser()
 
+    # Actions a patient must reach without logging in. Everything else
+    # requires staff authentication. Listing this way round means a newly
+    # added action is protected by default - the previous arrangement
+    # returned AllowAny() for anything not named, which is how the
+    # 'disabled' endpoint (cancelled patient bookings, with reasons)
+    # became publicly readable more than once.
+    PUBLIC_ACTIONS = (
+        "create",          # patients book without an account
+        "retrieve",        # ref_code acts as the ticket
+        "public_lookup",   # ref_code lookup from the check-appointment page
+    )
+
     def get_permissions(self):
-        if self.action in ("destroy",):
-            return [IsAuthenticated()]
-        return [AllowAny()]
+        if self.action in self.PUBLIC_ACTIONS:
+            return [AllowAny()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         include_disabled = (
@@ -1560,6 +1572,18 @@ class BookingViewSet(viewsets.ModelViewSet):
         )
 
         queryset = Booking.objects.all()
+
+        # referral_doc_data holds base64 documents - 274 MB across 2,747
+        # bookings, one record at 6.2 MB. BookingListSerializer keeps them
+        # out of the response, but without defer() Django still SELECTs
+        # them and materialises the lot in memory on every list request,
+        # which is what drives gunicorn to 22 GB. Detail retrieve is not
+        # deferred, so staff can still open referral documents.
+        if self.action == "list":
+            queryset = queryset.defer(
+                "referral_doc_data",
+                "referral_doc_text",
+            )
 
         if include_disabled:
             return queryset
@@ -2025,11 +2049,26 @@ class BookingViewSet(viewsets.ModelViewSet):
         # Keep disabled bookings live as well. This avoids stale registry data
         # and, importantly, preserves the exact response expected by the
         # existing React dashboard.
+        # .defer() here for the same reason as get_queryset(): this action
+        # builds its own queryset, so the deferral applied there does not
+        # reach it, and without this every call fetches 274 MB of base64
+        # referral documents from MySQL.
         queryset = Booking.objects.filter(
             Q(is_active=False)
             | Q(status="Disabled")
+        ).defer(
+            "referral_doc_data",
+            "referral_doc_text",
         )
-        serializer = self.get_serializer(queryset, many=True)
+        # Use the list serializer explicitly. self.get_serializer() would
+        # resolve to the full BookingSerializer, because get_serializer_class()
+        # only returns the list variant when self.action == "list" and here
+        # the action is "disabled_bookings".
+        serializer = BookingListSerializer(
+            queryset,
+            many=True,
+            context=self.get_serializer_context(),
+        )
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(
@@ -2924,7 +2963,7 @@ class ClinicAnalyticsViewSet(viewsets.ViewSet):
         # Build booking counts per department/clinic
         booking_count_map = {}
         for b in today_bookings:
-            dept_key = (b.department or b.doctor_specialty or "").strip().lower()
+            dept_key = (b.doctor_specialty or "").strip().lower()
             if dept_key:
                 booking_count_map[dept_key] = booking_count_map.get(dept_key, 0) + 1
 

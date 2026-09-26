@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 HOSPITAL_NAME = "Isalu Hospitals"
 HOSPITAL_ADDRESS = "No. 46, Ijaiye Road (beside Tastee Fried Chicken and opposite Ogba Shopping Arcade / Caterpillar Bus Stop), Ogba, Ikeja, Lagos, Nigeria"
-HOSPITAL_PHONE = "+234 800 472 5800"
+HOSPITAL_PHONE = "+234 806 228 7502"
 HOSPITAL_EMAIL = "info@isaluhospitals.com"
 
 
