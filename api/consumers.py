@@ -5,6 +5,14 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 class MedicalBookingConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self.user = self.scope.get("user")
+        # Patient records travel over this socket (patient_name, ref_code,
+        # date, doctor_id via broadcast_booking_update). The public booking
+        # form needs no auth, but this feed is staff-only, so reject
+        # unauthenticated sockets before joining any group.
+        if not (self.user and self.user.is_authenticated):
+            await self.close(code=4401)
+            return
+
 
         # Join the hospital staff real-time feed
         await self.channel_layer.group_add("hospital_feed", self.channel_name)
