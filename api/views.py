@@ -64,6 +64,7 @@ DISABLED_BOOKINGS_CACHE_KEY = "isalu:dashboard:bookings:disabled:v1"
 BOOKING_SUMMARY_CACHE_KEY = "isalu:dashboard:bookings:summary:v1"
 
 
+
 def invalidate_dashboard_cache():
     """Invalidate cached dashboard booking data after any booking mutation."""
     try:
@@ -361,9 +362,16 @@ def count_active_bookings(doctor, date_str=None, date_range=None):
     doctor_ids = [x for x in doctor_ids if x]
     doc_name = str(doctor.full_name or doctor.name or "").strip()
 
+    # filter_q = Q(doctor_id__in=doctor_ids)
+    # if doc_name:
+    #     filter_q |= Q(doctor_name__icontains=doc_name)
+
     filter_q = Q(doctor_id__in=doctor_ids)
+
     if doc_name:
-        filter_q |= Q(doctor_name__icontains=doc_name)
+        filter_q |= Q(
+            doctor_name__icontains=doc_name
+        )
 
     qs = (
         Booking.objects
@@ -1524,61 +1532,905 @@ class SpecialistScheduleViewSet(viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
-
 # ============================================================
 # BOOKING
 # ============================================================
 
+from rest_framework.pagination import PageNumberPagination
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 100
+    page_size_query_param = 'page_size'
+    max_page_size = 200
+
+# class BookingViewSet(viewsets.ModelViewSet):
+#     queryset = Booking.objects.all().order_by('-created_at')
+#     serializer_class = BookingSerializer
+#     permission_classes = [AllowAny]
+#     lookup_field = "ref_code"
+#     # pagination_class = StandardResultsSetPagination
+
+#     def get_serializer_class(self):
+#         if self.action == "list":
+#             return BookingListSerializer
+#         return BookingSerializer
+
+#     def perform_authentication(self, request):
+#         try:
+#             super().perform_authentication(request)
+#         except Exception:
+#             from django.contrib.auth.models import AnonymousUser
+#             request.user = AnonymousUser()
+
+#     def get_permissions(self):
+#         if self.action in ("destroy",):
+#             return [IsAuthenticated()]
+#         return [AllowAny()]
+
+#     def get_queryset(self):
+#         include_disabled = (
+#             self.request.query_params.get(
+#                 "include_disabled"
+#             )
+#             == "true"
+#         )
+
+#         queryset = Booking.objects.all()
+
+#         if include_disabled:
+#             return queryset
+
+#         return (
+#             queryset
+#             .filter(is_active=True)
+#             .exclude(status="Disabled")
+#         )
+
+#     def perform_create(self, serializer):
+#         booking = serializer.save()
+#         broadcast_booking_update(
+#             booking,
+#             event_type="NEW_BOOKING",
+#             message=f"New appointment booked for {booking.patient_name} ({booking.ref_code})."
+#         )
+
+#     def list(self, request, *args, **kwargs):
+#         if not is_staff_request(request):
+#             return Response(
+#                 {
+#                     "detail": (
+#                         "Authentication required. Access to "
+#                         "patient booking registry is restricted "
+#                         "to authorized hospital staff."
+#                     )
+#                 },
+#                 status=status.HTTP_401_UNAUTHORIZED,
+#             )
+
+#         # Do NOT cache the live booking registry response.
+#         # The dashboard expects the exact DRF response shape (including any
+#         # pagination/query parameters), and staff users must always receive
+#         # current booking data. Redis remains responsible for the lightweight
+#         # dashboard summary below.
+#         return super().list(
+#             request,
+#             *args,
+#             **kwargs,
+#         )
+
+#     def destroy(self, request, *args, **kwargs):
+#         if not is_staff_request(request):
+#             return Response(
+#                 {
+#                     "detail": (
+#                         "Authentication required. Only "
+#                         "authorized hospital staff can "
+#                         "delete or disable appointment records."
+#                     )
+#                 },
+#                 status=status.HTTP_403_FORBIDDEN,
+#             )
+
+#         booking = self.get_object()
+
+#         reason = (
+#             request.data.get("reason")
+#             or request.data.get("delete_reason")
+#             or request.data.get("deleteReason")
+#             or "Disabled by Administrator"
+#         )
+
+#         booking.is_active = False
+#         booking.status = "Disabled"
+#         booking.delete_reason = reason
+#         booking.save()
+
+#         # Real-time WebSocket event
+#         broadcast_booking_update(
+#             booking,
+#             event_type="BOOKING_DISABLED",
+#             message=f"Booking {booking.ref_code} was disabled."
+#         )
+
+#         return Response(
+#             {
+#                 "message": (
+#                     f"Booking {booking.ref_code} "
+#                     "disabled successfully."
+#                 ),
+#                 "data": BookingSerializer(
+#                     booking
+#                 ).data,
+#             },
+#             status=status.HTTP_200_OK,
+#         )
+
+#     def _validate_completion_payment(
+#         self,
+#         booking,
+#         request,
+#     ):
+#         new_status = request.data.get("status")
+
+#         if (
+#             new_status == "Completed"
+#             and booking.payment_status == "Pending"
+#         ):
+#             return Response(
+#                 {
+#                     "error": (
+#                         "Payment Clearance Required: Ticket "
+#                         f"{booking.ref_code} cannot be marked as "
+#                         "Completed while payment status is Pending."
+#                     )
+#                 },
+#                 status=status.HTTP_400_BAD_REQUEST,
+#             )
+
+#         return None
+
+#     def partial_update(
+#         self,
+#         request,
+#         *args,
+#         **kwargs,
+#     ):
+#         booking = self.get_object()
+
+#         error = self._validate_completion_payment(
+#             booking,
+#             request,
+#         )
+
+#         if error:
+#             return error
+
+#         response = super().partial_update(
+#             request,
+#             *args,
+#             **kwargs,
+#         )
+
+#         # Real-time WebSocket event
+#         booking.refresh_from_db()
+#         broadcast_booking_update(
+#             booking,
+#             event_type="BOOKING_UPDATED",
+#             message=f"Booking {booking.ref_code} updated."
+#         )
+
+#         return response
+
+#     def update(
+#         self,
+#         request,
+#         *args,
+#         **kwargs,
+#     ):
+#         booking = self.get_object()
+
+#         error = self._validate_completion_payment(
+#             booking,
+#             request,
+#         )
+
+#         if error:
+#             return error
+
+#         response = super().update(
+#             request,
+#             *args,
+#             **kwargs,
+#         )
+
+#         # Real-time WebSocket event
+#         booking.refresh_from_db()
+#         broadcast_booking_update(
+#             booking,
+#             event_type="BOOKING_UPDATED",
+#             message=f"Booking {booking.ref_code} fully updated."
+#         )
+
+#         return response
+
+#     @action(
+#         detail=True,
+#         methods=["post"],
+#         url_path="send-reminder",
+#     )
+#     def send_reminder(self, request, ref_code=None):
+#         """Sends Email and SMS reminder to patient for a single appointment."""
+#         booking = self.get_object()
+#         force = request.data.get("force", False)
+
+#         from api.notification_service import send_single_booking_reminder
+#         res = send_single_booking_reminder(booking, force=force)
+
+#         # Real-time WebSocket event
+#         broadcast_booking_update(
+#             booking,
+#             event_type="REMINDER_SENT",
+#             message=f"Reminder sent to {booking.patient_name} ({booking.ref_code})."
+#         )
+
+#         return Response(res, status=status.HTTP_200_OK)
+
+#     @action(
+#         detail=False,
+#         methods=["post"],
+#         url_path="send-bulk-reminders",
+#     )
+#     def send_bulk_reminders(self, request):
+#         """Triggers bulk Email + SMS reminders for upcoming appointments."""
+#         target_date = request.data.get("target_date") or request.data.get("date")
+#         days_ahead = int(request.data.get("days_ahead", 1))
+#         force = request.data.get("force", False)
+
+#         from api.notification_service import process_appointment_reminders
+#         summary = process_appointment_reminders(
+#             target_date=target_date,
+#             days_ahead=days_ahead,
+#             force=force
+#         )
+
+#         return Response(summary, status=status.HTTP_200_OK)
+
+#     @action(
+#         detail=False,
+#         methods=["get"],
+#         url_path="summary",
+#     )
+#     def summary(self, request):
+#         """Fast dashboard summary using one aggregate query plus Redis."""
+#         cached = get_cached_response(BOOKING_SUMMARY_CACHE_KEY)
+#         if cached is not None:
+#             return Response(cached, status=status.HTTP_200_OK)
+
+#         summary = Booking.objects.aggregate(
+#             total=Count("id"),
+#             checked_in=Count("id", filter=Q(status="Checked In")),
+#             pending_hmo=Count(
+#                 "id",
+#                 filter=(
+#                     Q(payment_type="HMO Insurance")
+#                     & ~Q(hmo_status="Approved")
+#                 ),
+#             ),
+#             pending_cash=Count(
+#                 "id",
+#                 filter=(
+#                     Q(payment_type="Private Self-Pay")
+#                     & ~Q(payment_status="Cleared")
+#                 ),
+#             ),
+#         )
+
+#         payload = {
+#             "totalBookings": summary.get("total") or 0,
+#             "checkedInCount": summary.get("checked_in") or 0,
+#             "pendingHmoCount": summary.get("pending_hmo") or 0,
+#             "pendingCashCount": summary.get("pending_cash") or 0,
+#         }
+#         set_cached_response(BOOKING_SUMMARY_CACHE_KEY, payload)
+#         return Response(payload, status=status.HTTP_200_OK)
+
+#     @action(
+#         detail=False,
+#         methods=["post"],
+#         url_path="clear-all",
+#     )
+#     def clear_all(self, request):
+#         if not is_staff_request(request):
+#             return Response(
+#                 {
+#                     "detail": (
+#                         "Authentication required."
+#                     )
+#                 },
+#                 status=status.HTTP_403_FORBIDDEN,
+#             )
+
+#         reason = (
+#             request.data.get("reason")
+#             or "Cleared by authorized administrator"
+#         )
+
+#         count = (
+#             Booking.objects
+#             .filter(is_active=True)
+#             .update(
+#                 is_active=False,
+#                 status="Disabled",
+#                 delete_reason=reason,
+#             )
+#         )
+
+#         # Real-time WebSocket bulk refresh event
+#         broadcast_bulk_refresh(
+#             action_name="BOOKINGS_CLEARED",
+#             message=f"{count} booking records were disabled by administrator."
+#         )
+
+#         return Response(
+#             {
+#                 "message": (
+#                     f"{count} booking records disabled."
+#                 ),
+#                 "count": count,
+#             }
+#         )
+
+#     @action(
+#         detail=False,
+#         methods=["get"],
+#         url_path="availability",
+#         permission_classes=[AllowAny],
+#     )
+#     def availability(self, request):
+#         doctor_id = str(
+#             request.query_params.get(
+#                 "doctor_id"
+#             )
+#             or ""
+#         ).strip()
+
+#         date_str = str(
+#             request.query_params.get(
+#                 "date"
+#             )
+#             or ""
+#         ).strip()
+
+#         if not doctor_id or not date_str:
+#             return Response(
+#                 {
+#                     "error": (
+#                         "doctor_id and date are required."
+#                     )
+#                 },
+#                 status=status.HTTP_400_BAD_REQUEST,
+#             )
+
+#         try:
+#             appointment_date = datetime.datetime.strptime(
+#                 date_str,
+#                 "%Y-%m-%d",
+#             ).date()
+#         except ValueError:
+#             return Response(
+#                 {
+#                     "error": (
+#                         "Invalid appointment date. "
+#                         "Use YYYY-MM-DD."
+#                     )
+#                 },
+#                 status=status.HTTP_400_BAD_REQUEST,
+#             )
+
+#         doctor = (
+#             Doctor.objects
+#             .filter(doc_id__iexact=doctor_id)
+#             .first()
+#         )
+
+#         if not doctor:
+#             return Response(
+#                 {
+#                     "error": "Doctor not found."
+#                 },
+#                 status=status.HTTP_404_NOT_FOUND,
+#             )
+
+#         resolved = resolve_day_schedule(doctor, appointment_date)
+#         capacity = resolved["capacity"]
+#         on_duty = resolved["on_duty"]
+
+#         booked = count_active_bookings(doctor, date_str=date_str)
+#         remaining = max(0, capacity - booked)
+#         is_full = booked >= capacity
+
+#         return Response({
+#             "doctorId": doctor.doc_id,
+#             "date": date_str,
+#             "booked": booked,
+#             "capacity": capacity,
+#             "remaining": remaining,
+#             "is_full": is_full,
+#             "available": (not is_full) and bool(doctor.status) and on_duty,
+#             "onDuty": on_duty,
+#         })
+
+#     @action(
+#         detail=False,
+#         methods=["get"],
+#         url_path="public-lookup",
+#         permission_classes=[AllowAny],
+#     )
+#     def public_lookup(self, request):
+#         ref_code = str(
+#             request.query_params.get(
+#                 "ref_code"
+#             )
+#             or ""
+#         ).strip()
+
+#         phone = str(
+#             request.query_params.get(
+#                 "phone"
+#             )
+#             or ""
+#         ).strip()
+
+#         if not ref_code and not phone:
+#             return Response(
+#                 {
+#                     "error": (
+#                         "Booking reference or phone number "
+#                         "is required."
+#                     )
+#                 },
+#                 status=status.HTTP_400_BAD_REQUEST,
+#             )
+
+#         if ref_code:
+#             booking = (
+#                 Booking.objects
+#                 .filter(ref_code__iexact=ref_code)
+#                 .first()
+#             )
+#         else:
+#             booking = (
+#                 Booking.objects
+#                 .filter(patient_phone__iexact=phone)
+#                 .order_by("-created_at")
+#                 .first()
+#             )
+
+#         if not booking:
+#             return Response(
+#                 {
+#                     "error": "Appointment not found."
+#                 },
+#                 status=status.HTTP_404_NOT_FOUND,
+#             )
+
+#         if (
+#             phone
+#             and booking.patient_phone.strip() != phone
+#         ):
+#             return Response(
+#                 {
+#                     "error": (
+#                         "Appointment details could not "
+#                         "be verified."
+#                     )
+#                 },
+#                 status=status.HTTP_404_NOT_FOUND,
+#             )
+
+#         return Response(
+#             BookingSerializer(booking).data
+#         )
+
+#     @action(
+#         detail=False,
+#         methods=["get"],
+#         url_path="disabled",
+#     )
+#     def disabled_bookings(self, request):
+#         # Keep disabled bookings live as well. This avoids stale registry data
+#         # and, importantly, preserves the exact response expected by the
+#         # existing React dashboard.
+#         queryset = Booking.objects.filter(
+#             Q(is_active=False)
+#             | Q(status="Disabled")
+#         )
+#         serializer = self.get_serializer(queryset, many=True)
+#         return Response(serializer.data, status=status.HTTP_200_OK)
+
+#     @action(
+#         detail=True,
+#         methods=["post"],
+#         url_path="restore",
+#     )
+#     def restore_booking(
+#         self,
+#         request,
+#         ref_code=None,
+#     ):
+#         booking = (
+#             Booking.objects
+#             .filter(ref_code=ref_code)
+#             .first()
+#         )
+
+#         if not booking:
+#             return Response(
+#                 {
+#                     "error": (
+#                         "Booking record not found."
+#                     )
+#                 },
+#                 status=status.HTTP_404_NOT_FOUND,
+#             )
+
+#         booking.is_active = True
+#         booking.status = "Booked"
+#         booking.delete_reason = ""
+#         booking.save()
+
+#         # Real-time WebSocket event
+#         broadcast_booking_update(
+#             booking,
+#             event_type="BOOKING_RESTORED",
+#             message=f"Booking {booking.ref_code} restored successfully."
+#         )
+
+#         return Response(
+#             {
+#                 "message": (
+#                     f"Booking {booking.ref_code} "
+#                     "restored successfully."
+#                 ),
+#                 "data": BookingSerializer(
+#                     booking
+#                 ).data,
+#             }
+#         )
+
+#     @action(
+#         detail=True,
+#         methods=["post", "patch"],
+#         url_path="reroute-cashdesk",
+#     )
+#     def reroute_cashdesk(
+#         self,
+#         request,
+#         ref_code=None,
+#     ):
+#         booking = (
+#             Booking.objects
+#             .filter(ref_code=ref_code)
+#             .first()
+#         )
+
+#         if not booking:
+#             return Response(
+#                 {
+#                     "error": (
+#                         f"Booking ticket {ref_code} "
+#                         "not found."
+#                     )
+#                 },
+#                 status=status.HTTP_404_NOT_FOUND,
+#             )
+
+#         remark = (
+#             request.data.get("remark")
+#             or request.data.get("delete_reason")
+#             or request.data.get("hmoRemark")
+#             or request.data.get("hmo_status")
+#             or "Passed from HMO to Cashdesk"
+#         )
+
+#         booking.payment_type = "Private Self-Pay"
+#         booking.hmo_name = "N/A"
+#         booking.hmo_status = (
+#             "Re-routed to Cashdesk "
+#             f"(Self-Pay): {remark}"
+#         )
+#         booking.payment_status = "Pending"
+#         booking.delete_reason = (
+#             "Re-routed from HMO to Cashdesk: "
+#             f"{remark}"
+#         )
+#         booking.save()
+
+#         # Real-time WebSocket event
+#         broadcast_booking_update(
+#             booking,
+#             event_type="BOOKING_REROUTED_CASHDESK",
+#             message=f"Ticket {booking.ref_code} re-routed to Cashdesk."
+#         )
+
+#         return Response(
+#             {
+#                 "message": (
+#                     f"Ticket {booking.ref_code} "
+#                     "re-routed to Cashdesk as "
+#                     "Private Self-Pay."
+#                 ),
+#                 "data": BookingSerializer(
+#                     booking
+#                 ).data,
+#             },
+#             status=status.HTTP_200_OK,
+#         )
+
+#     @action(
+#         detail=True,
+#         methods=["post"],
+#         url_path="check-in",
+#     )
+#     def check_in(
+#         self,
+#         request,
+#         ref_code=None,
+#     ):
+#         booking = self.get_object()
+
+#         if (
+#             booking.payment_type == "HMO Insurance"
+#             and booking.hmo_status != "Approved"
+#         ):
+#             return Response(
+#                 {
+#                     "error": (
+#                         "HMO Approval Required: Cannot "
+#                         f"check in ticket {booking.ref_code} "
+#                         f"while HMO status is "
+#                         f"{booking.hmo_status or 'Awaiting Approval'}. "
+#                         "Route patient to HMO Desk first."
+#                     )
+#                 },
+#                 status=status.HTTP_400_BAD_REQUEST,
+#             )
+
+#         if booking.payment_status == "Pending":
+#             return Response(
+#                 {
+#                     "error": (
+#                         "Payment Clearance Required: Cannot "
+#                         f"check in ticket {booking.ref_code} "
+#                         "while payment is Pending. Route "
+#                         "patient to Cashdesk first."
+#                     )
+#                 },
+#                 status=status.HTTP_400_BAD_REQUEST,
+#             )
+
+#         booking.status = "Checked In"
+#         booking.save()
+
+#         # Real-time WebSocket event
+#         broadcast_booking_update(
+#             booking,
+#             event_type="PATIENT_CHECKED_IN",
+#             message=f"Patient {booking.patient_name} ({booking.ref_code}) checked in."
+#         )
+
+#         return Response(
+#             {
+#                 "message": (
+#                     f"Patient {booking.patient_name} "
+#                     "checked in successfully."
+#                 ),
+#                 "data": BookingSerializer(
+#                     booking
+#                 ).data,
+#             }
+#         )
+
+#     @action(
+#         detail=True,
+#         methods=["post"],
+#         url_path="approve-hmo",
+#     )
+#     def approve_hmo(
+#         self,
+#         request,
+#         ref_code=None,
+#     ):
+#         booking = self.get_object()
+
+#         policy = (
+#             request.data.get("policyCode")
+#             or booking.hmo_policy_code
+#             or f"POL-{random.randint(100000, 999999)}"
+#         )
+
+#         auth = (
+#             request.data.get("authCode")
+#             or booking.hmo_auth_code
+#             or f"AUTH-{random.randint(1000, 9999)}"
+#         )
+
+#         booking.hmo_policy_code = policy
+#         booking.hmo_auth_code = auth
+#         booking.hmo_status = "Approved"
+#         booking.payment_status = "Cleared"
+#         booking.save()
+
+#         # Real-time WebSocket event
+#         broadcast_booking_update(
+#             booking,
+#             event_type="HMO_APPROVED",
+#             message=f"HMO pre-authorization approved for ticket {booking.ref_code}."
+#         )
+
+#         return Response(
+#             {
+#                 "message": (
+#                     "Pre-Authorization cleared "
+#                     f"for ticket {booking.ref_code}."
+#                 ),
+#                 "authCode": auth,
+#                 "data": BookingSerializer(
+#                     booking
+#                 ).data,
+#             }
+#         )
+
+#     @action(
+#         detail=True,
+#         methods=["post"],
+#         url_path="pay-cashdesk",
+#     )
+#     def pay_cashdesk(
+#         self,
+#         request,
+#         ref_code=None,
+#     ):
+#         booking = self.get_object()
+
+#         method = (
+#             request.data.get(
+#                 "paymentMethod"
+#             )
+#             or "POS Card Terminal"
+#         )
+
+#         invoice = (
+#             f"INV-{random.randint(100000, 999999)}"
+#         )
+
+#         booking.payment_status = "Cleared"
+#         booking.payment_method = method
+#         booking.invoice_ref = invoice
+#         booking.save()
+
+#         # Real-time WebSocket event
+#         broadcast_booking_update(
+#             booking,
+#             event_type="PAYMENT_CLEARED",
+#             message=f"Cashdesk payment cleared via {method} for ticket {booking.ref_code}."
+#         )
+
+#         return Response(
+#             {
+#                 "message": (
+#                     f"Cashdesk payment cleared "
+#                     f"via {method}."
+#                 ),
+#                 "invoiceRef": invoice,
+#                 "data": BookingSerializer(
+#                     booking
+#                 ).data,
+#             }
+#         )
+
+
 class BookingViewSet(viewsets.ModelViewSet):
+    """
+    Optimized booking API.
+
+    Performance principles:
+    - Keep live booking registry uncached.
+    - Reuse the class queryset instead of rebuilding it unnecessarily.
+    - Avoid unnecessary refresh_from_db() queries after serializer.save().
+    - Use update_fields for targeted database updates.
+    - Preserve all existing endpoint URLs, response structures,
+      validation rules and WebSocket events.
+    """
+
+    queryset = Booking.objects.all().order_by("-created_at")
     serializer_class = BookingSerializer
     permission_classes = [AllowAny]
     lookup_field = "ref_code"
 
+    # Do not enable pagination here unless the React frontend has
+    # explicitly been updated to consume paginated responses.
+    #
+    # pagination_class = StandardResultsSetPagination
+
     def get_serializer_class(self):
+        """
+        Use the lightweight list serializer for the booking registry.
+
+        This avoids serializing unnecessary fields for the large,
+        frequently refreshed dashboard registry.
+        """
         if self.action == "list":
             return BookingListSerializer
+
         return BookingSerializer
 
     def perform_authentication(self, request):
+        """
+        Preserve the existing anonymous fallback behavior.
+
+        Authentication failures should not prevent public endpoints
+        from being accessed.
+        """
         try:
             super().perform_authentication(request)
         except Exception:
             from django.contrib.auth.models import AnonymousUser
+
             request.user = AnonymousUser()
 
     def get_permissions(self):
-        if self.action in ("destroy",):
+        """
+        Preserve existing permission behavior.
+
+        Staff authorization for sensitive operations is still handled
+        by is_staff_request() in the affected actions.
+        """
+        if self.action == "destroy":
             return [IsAuthenticated()]
+
         return [AllowAny()]
 
     def get_queryset(self):
         include_disabled = (
-            self.request.query_params.get(
-                "include_disabled"
-            )
+            self.request.query_params.get("include_disabled")
             == "true"
         )
 
         queryset = Booking.objects.all()
 
-        if include_disabled:
-            return queryset
+        if not include_disabled:
+            queryset = (
+                queryset
+                .filter(is_active=True)
+                .exclude(status="Disabled")
+            )
 
-        return (
-            queryset
-            .filter(is_active=True)
-            .exclude(status="Disabled")
-        )
+        return queryset.order_by("-created_at")
 
     def perform_create(self, serializer):
+        """
+        Save once, then broadcast the already-populated instance.
+
+        No additional database lookup is required.
+        """
         booking = serializer.save()
+
         broadcast_booking_update(
             booking,
             event_type="NEW_BOOKING",
-            message=f"New appointment booked for {booking.patient_name} ({booking.ref_code})."
+            message=(
+                f"New appointment booked for "
+                f"{booking.patient_name} ({booking.ref_code})."
+            ),
         )
 
     def list(self, request, *args, **kwargs):
+        """
+        Live staff booking registry.
+
+        Intentionally not cached.
+        """
         if not is_staff_request(request):
             return Response(
                 {
@@ -1591,11 +2443,6 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        # Do NOT cache the live booking registry response.
-        # The dashboard expects the exact DRF response shape (including any
-        # pagination/query parameters), and staff users must always receive
-        # current booking data. Redis remains responsible for the lightweight
-        # dashboard summary below.
         return super().list(
             request,
             *args,
@@ -1603,6 +2450,11 @@ class BookingViewSet(viewsets.ModelViewSet):
         )
 
     def destroy(self, request, *args, **kwargs):
+        """
+        Soft-delete / disable a booking.
+
+        Uses update_fields to avoid writing unrelated columns.
+        """
         if not is_staff_request(request):
             return Response(
                 {
@@ -1627,13 +2479,19 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.is_active = False
         booking.status = "Disabled"
         booking.delete_reason = reason
-        booking.save()
 
-        # Real-time WebSocket event
+        booking.save(
+            update_fields=[
+                "is_active",
+                "status",
+                "delete_reason",
+            ]
+        )
+
         broadcast_booking_update(
             booking,
             event_type="BOOKING_DISABLED",
-            message=f"Booking {booking.ref_code} was disabled."
+            message=f"Booking {booking.ref_code} was disabled.",
         )
 
         return Response(
@@ -1642,9 +2500,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                     f"Booking {booking.ref_code} "
                     "disabled successfully."
                 ),
-                "data": BookingSerializer(
-                    booking
-                ).data,
+                "data": BookingSerializer(booking).data,
             },
             status=status.HTTP_200_OK,
         )
@@ -1654,6 +2510,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking,
         request,
     ):
+        """
+        Prevent completion while payment is pending.
+        """
         new_status = request.data.get("status")
 
         if (
@@ -1679,6 +2538,16 @@ class BookingViewSet(viewsets.ModelViewSet):
         *args,
         **kwargs,
     ):
+        """
+        PATCH booking.
+
+        The old implementation performed:
+            serializer.save()
+            booking.refresh_from_db()
+
+        The refresh was unnecessary because DRF's serializer.save()
+        updates the same model instance used here.
+        """
         booking = self.get_object()
 
         error = self._validate_completion_payment(
@@ -1695,12 +2564,11 @@ class BookingViewSet(viewsets.ModelViewSet):
             **kwargs,
         )
 
-        # Real-time WebSocket event
-        booking.refresh_from_db()
+        # No refresh_from_db().
         broadcast_booking_update(
             booking,
             event_type="BOOKING_UPDATED",
-            message=f"Booking {booking.ref_code} updated."
+            message=f"Booking {booking.ref_code} updated.",
         )
 
         return response
@@ -1711,6 +2579,12 @@ class BookingViewSet(viewsets.ModelViewSet):
         *args,
         **kwargs,
     ):
+        """
+        PUT booking.
+
+        Avoids the unnecessary second SELECT caused by
+        refresh_from_db().
+        """
         booking = self.get_object()
 
         error = self._validate_completion_payment(
@@ -1727,12 +2601,13 @@ class BookingViewSet(viewsets.ModelViewSet):
             **kwargs,
         )
 
-        # Real-time WebSocket event
-        booking.refresh_from_db()
+        # serializer.save() already updated the instance.
         broadcast_booking_update(
             booking,
             event_type="BOOKING_UPDATED",
-            message=f"Booking {booking.ref_code} fully updated."
+            message=(
+                f"Booking {booking.ref_code} fully updated."
+            ),
         )
 
         return response
@@ -1742,22 +2617,39 @@ class BookingViewSet(viewsets.ModelViewSet):
         methods=["post"],
         url_path="send-reminder",
     )
-    def send_reminder(self, request, ref_code=None):
-        """Sends Email and SMS reminder to patient for a single appointment."""
+    def send_reminder(
+        self,
+        request,
+        ref_code=None,
+    ):
+        """
+        Send a reminder for one booking.
+        """
         booking = self.get_object()
         force = request.data.get("force", False)
 
-        from api.notification_service import send_single_booking_reminder
-        res = send_single_booking_reminder(booking, force=force)
+        from api.notification_service import (
+            send_single_booking_reminder,
+        )
 
-        # Real-time WebSocket event
+        result = send_single_booking_reminder(
+            booking,
+            force=force,
+        )
+
         broadcast_booking_update(
             booking,
             event_type="REMINDER_SENT",
-            message=f"Reminder sent to {booking.patient_name} ({booking.ref_code})."
+            message=(
+                f"Reminder sent to "
+                f"{booking.patient_name} ({booking.ref_code})."
+            ),
         )
 
-        return Response(res, status=status.HTTP_200_OK)
+        return Response(
+            result,
+            status=status.HTTP_200_OK,
+        )
 
     @action(
         detail=False,
@@ -1765,19 +2657,34 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="send-bulk-reminders",
     )
     def send_bulk_reminders(self, request):
-        """Triggers bulk Email + SMS reminders for upcoming appointments."""
-        target_date = request.data.get("target_date") or request.data.get("date")
-        days_ahead = int(request.data.get("days_ahead", 1))
+        """
+        Trigger bulk appointment reminders.
+        """
+        target_date = (
+            request.data.get("target_date")
+            or request.data.get("date")
+        )
+
+        days_ahead = int(
+            request.data.get("days_ahead", 1)
+        )
+
         force = request.data.get("force", False)
 
-        from api.notification_service import process_appointment_reminders
+        from api.notification_service import (
+            process_appointment_reminders,
+        )
+
         summary = process_appointment_reminders(
             target_date=target_date,
             days_ahead=days_ahead,
-            force=force
+            force=force,
         )
 
-        return Response(summary, status=status.HTTP_200_OK)
+        return Response(
+            summary,
+            status=status.HTTP_200_OK,
+        )
 
     @action(
         detail=False,
@@ -1785,14 +2692,28 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="summary",
     )
     def summary(self, request):
-        """Fast dashboard summary using one aggregate query plus Redis."""
-        cached = get_cached_response(BOOKING_SUMMARY_CACHE_KEY)
+        """
+        Fast dashboard summary.
+
+        Redis handles repeated dashboard requests.
+        Cache miss requires only one aggregate database query.
+        """
+        cached = get_cached_response(
+            BOOKING_SUMMARY_CACHE_KEY
+        )
+
         if cached is not None:
-            return Response(cached, status=status.HTTP_200_OK)
+            return Response(
+                cached,
+                status=status.HTTP_200_OK,
+            )
 
         summary = Booking.objects.aggregate(
             total=Count("id"),
-            checked_in=Count("id", filter=Q(status="Checked In")),
+            checked_in=Count(
+                "id",
+                filter=Q(status="Checked In"),
+            ),
             pending_hmo=Count(
                 "id",
                 filter=(
@@ -1815,8 +2736,16 @@ class BookingViewSet(viewsets.ModelViewSet):
             "pendingHmoCount": summary.get("pending_hmo") or 0,
             "pendingCashCount": summary.get("pending_cash") or 0,
         }
-        set_cached_response(BOOKING_SUMMARY_CACHE_KEY, payload)
-        return Response(payload, status=status.HTTP_200_OK)
+
+        set_cached_response(
+            BOOKING_SUMMARY_CACHE_KEY,
+            payload,
+        )
+
+        return Response(
+            payload,
+            status=status.HTTP_200_OK,
+        )
 
     @action(
         detail=False,
@@ -1824,6 +2753,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="clear-all",
     )
     def clear_all(self, request):
+        """
+        Disable all active bookings in one SQL UPDATE.
+        """
         if not is_staff_request(request):
             return Response(
                 {
@@ -1849,10 +2781,12 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
         )
 
-        # Real-time WebSocket bulk refresh event
         broadcast_bulk_refresh(
             action_name="BOOKINGS_CLEARED",
-            message=f"{count} booking records were disabled by administrator."
+            message=(
+                f"{count} booking records were "
+                "disabled by administrator."
+            ),
         )
 
         return Response(
@@ -1871,17 +2805,16 @@ class BookingViewSet(viewsets.ModelViewSet):
         permission_classes=[AllowAny],
     )
     def availability(self, request):
+        """
+        Return appointment availability for one doctor/date.
+        """
         doctor_id = str(
-            request.query_params.get(
-                "doctor_id"
-            )
+            request.query_params.get("doctor_id")
             or ""
         ).strip()
 
         date_str = str(
-            request.query_params.get(
-                "date"
-            )
+            request.query_params.get("date")
             or ""
         ).strip()
 
@@ -1896,10 +2829,12 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            appointment_date = datetime.datetime.strptime(
-                date_str,
-                "%Y-%m-%d",
-            ).date()
+            appointment_date = (
+                datetime.datetime.strptime(
+                    date_str,
+                    "%Y-%m-%d",
+                ).date()
+            )
         except ValueError:
             return Response(
                 {
@@ -1925,24 +2860,42 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        resolved = resolve_day_schedule(doctor, appointment_date)
+        resolved = resolve_day_schedule(
+            doctor,
+            appointment_date,
+        )
+
         capacity = resolved["capacity"]
         on_duty = resolved["on_duty"]
 
-        booked = count_active_bookings(doctor, date_str=date_str)
-        remaining = max(0, capacity - booked)
+        booked = count_active_bookings(
+            doctor,
+            date_str=date_str,
+        )
+
+        remaining = max(
+            0,
+            capacity - booked,
+        )
+
         is_full = booked >= capacity
 
-        return Response({
-            "doctorId": doctor.doc_id,
-            "date": date_str,
-            "booked": booked,
-            "capacity": capacity,
-            "remaining": remaining,
-            "is_full": is_full,
-            "available": (not is_full) and bool(doctor.status) and on_duty,
-            "onDuty": on_duty,
-        })
+        return Response(
+            {
+                "doctorId": doctor.doc_id,
+                "date": date_str,
+                "booked": booked,
+                "capacity": capacity,
+                "remaining": remaining,
+                "is_full": is_full,
+                "available": (
+                    (not is_full)
+                    and bool(doctor.status)
+                    and on_duty
+                ),
+                "onDuty": on_duty,
+            }
+        )
 
     @action(
         detail=False,
@@ -1951,17 +2904,16 @@ class BookingViewSet(viewsets.ModelViewSet):
         permission_classes=[AllowAny],
     )
     def public_lookup(self, request):
+        """
+        Public appointment lookup by reference or phone.
+        """
         ref_code = str(
-            request.query_params.get(
-                "ref_code"
-            )
+            request.query_params.get("ref_code")
             or ""
         ).strip()
 
         phone = str(
-            request.query_params.get(
-                "phone"
-            )
+            request.query_params.get("phone")
             or ""
         ).strip()
 
@@ -2022,15 +2974,29 @@ class BookingViewSet(viewsets.ModelViewSet):
         url_path="disabled",
     )
     def disabled_bookings(self, request):
-        # Keep disabled bookings live as well. This avoids stale registry data
-        # and, importantly, preserves the exact response expected by the
-        # existing React dashboard.
-        queryset = Booking.objects.filter(
-            Q(is_active=False)
-            | Q(status="Disabled")
+        """
+        Return disabled bookings.
+
+        Kept live to preserve current dashboard behavior.
+        """
+        queryset = (
+            Booking.objects
+            .filter(
+                Q(is_active=False)
+                | Q(status="Disabled")
+            )
+            .order_by("-created_at")
         )
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+
+        serializer = self.get_serializer(
+            queryset,
+            many=True,
+        )
+
+        return Response(
+            serializer.data,
+            status=status.HTTP_200_OK,
+        )
 
     @action(
         detail=True,
@@ -2042,6 +3008,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
+        """
+        Restore a disabled booking.
+        """
         booking = (
             Booking.objects
             .filter(ref_code=ref_code)
@@ -2061,13 +3030,22 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.is_active = True
         booking.status = "Booked"
         booking.delete_reason = ""
-        booking.save()
 
-        # Real-time WebSocket event
+        booking.save(
+            update_fields=[
+                "is_active",
+                "status",
+                "delete_reason",
+            ]
+        )
+
         broadcast_booking_update(
             booking,
             event_type="BOOKING_RESTORED",
-            message=f"Booking {booking.ref_code} restored successfully."
+            message=(
+                f"Booking {booking.ref_code} "
+                "restored successfully."
+            ),
         )
 
         return Response(
@@ -2076,9 +3054,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                     f"Booking {booking.ref_code} "
                     "restored successfully."
                 ),
-                "data": BookingSerializer(
-                    booking
-                ).data,
+                "data": BookingSerializer(booking).data,
             }
         )
 
@@ -2092,6 +3068,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
+        """
+        Reroute an HMO booking to Cashdesk.
+        """
         booking = (
             Booking.objects
             .filter(ref_code=ref_code)
@@ -2128,13 +3107,24 @@ class BookingViewSet(viewsets.ModelViewSet):
             "Re-routed from HMO to Cashdesk: "
             f"{remark}"
         )
-        booking.save()
 
-        # Real-time WebSocket event
+        booking.save(
+            update_fields=[
+                "payment_type",
+                "hmo_name",
+                "hmo_status",
+                "payment_status",
+                "delete_reason",
+            ]
+        )
+
         broadcast_booking_update(
             booking,
             event_type="BOOKING_REROUTED_CASHDESK",
-            message=f"Ticket {booking.ref_code} re-routed to Cashdesk."
+            message=(
+                f"Ticket {booking.ref_code} "
+                "re-routed to Cashdesk."
+            ),
         )
 
         return Response(
@@ -2144,9 +3134,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                     "re-routed to Cashdesk as "
                     "Private Self-Pay."
                 ),
-                "data": BookingSerializer(
-                    booking
-                ).data,
+                "data": BookingSerializer(booking).data,
             },
             status=status.HTTP_200_OK,
         )
@@ -2161,6 +3149,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
+        """
+        Check a patient in after payment/HMO validation.
+        """
         booking = self.get_object()
 
         if (
@@ -2194,13 +3185,18 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
 
         booking.status = "Checked In"
-        booking.save()
 
-        # Real-time WebSocket event
+        booking.save(
+            update_fields=["status"]
+        )
+
         broadcast_booking_update(
             booking,
             event_type="PATIENT_CHECKED_IN",
-            message=f"Patient {booking.patient_name} ({booking.ref_code}) checked in."
+            message=(
+                f"Patient {booking.patient_name} "
+                f"({booking.ref_code}) checked in."
+            ),
         )
 
         return Response(
@@ -2209,9 +3205,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                     f"Patient {booking.patient_name} "
                     "checked in successfully."
                 ),
-                "data": BookingSerializer(
-                    booking
-                ).data,
+                "data": BookingSerializer(booking).data,
             }
         )
 
@@ -2225,6 +3219,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
+        """
+        Approve HMO pre-authorization.
+        """
         booking = self.get_object()
 
         policy = (
@@ -2243,13 +3240,23 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.hmo_auth_code = auth
         booking.hmo_status = "Approved"
         booking.payment_status = "Cleared"
-        booking.save()
 
-        # Real-time WebSocket event
+        booking.save(
+            update_fields=[
+                "hmo_policy_code",
+                "hmo_auth_code",
+                "hmo_status",
+                "payment_status",
+            ]
+        )
+
         broadcast_booking_update(
             booking,
             event_type="HMO_APPROVED",
-            message=f"HMO pre-authorization approved for ticket {booking.ref_code}."
+            message=(
+                "HMO pre-authorization approved "
+                f"for ticket {booking.ref_code}."
+            ),
         )
 
         return Response(
@@ -2259,9 +3266,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                     f"for ticket {booking.ref_code}."
                 ),
                 "authCode": auth,
-                "data": BookingSerializer(
-                    booking
-                ).data,
+                "data": BookingSerializer(booking).data,
             }
         )
 
@@ -2275,12 +3280,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         request,
         ref_code=None,
     ):
+        """
+        Clear payment at Cashdesk.
+        """
         booking = self.get_object()
 
         method = (
-            request.data.get(
-                "paymentMethod"
-            )
+            request.data.get("paymentMethod")
             or "POS Card Terminal"
         )
 
@@ -2291,13 +3297,22 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.payment_status = "Cleared"
         booking.payment_method = method
         booking.invoice_ref = invoice
-        booking.save()
 
-        # Real-time WebSocket event
+        booking.save(
+            update_fields=[
+                "payment_status",
+                "payment_method",
+                "invoice_ref",
+            ]
+        )
+
         broadcast_booking_update(
             booking,
             event_type="PAYMENT_CLEARED",
-            message=f"Cashdesk payment cleared via {method} for ticket {booking.ref_code}."
+            message=(
+                f"Cashdesk payment cleared via "
+                f"{method} for ticket {booking.ref_code}."
+            ),
         )
 
         return Response(
@@ -2307,12 +3322,10 @@ class BookingViewSet(viewsets.ModelViewSet):
                     f"via {method}."
                 ),
                 "invoiceRef": invoice,
-                "data": BookingSerializer(
-                    booking
-                ).data,
-            }
+                "data": BookingSerializer(booking).data,
+            },
+            status=status.HTTP_200_OK,
         )
-
 
 # ============================================================
 # HMO COMPANY

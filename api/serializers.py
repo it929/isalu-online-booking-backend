@@ -1446,6 +1446,8 @@ class SpecialistScheduleSerializer(
 
 class BookingSerializer(serializers.ModelSerializer):
 
+    queryset = Booking.objects.all().order_by('-created_at')
+
     # --------------------------------------------------------
     # REF CODE
     # --------------------------------------------------------
@@ -1486,6 +1488,10 @@ class BookingSerializer(serializers.ModelSerializer):
     # ========================================================
     # GENERATE UNIQUE BOOKING REFERENCE
     # ========================================================
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return BookingListSerializer
+        return BookingSerializer
 
     def _generate_ref_code(self):
         """
