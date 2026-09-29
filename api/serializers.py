@@ -1701,13 +1701,15 @@ class BookingSerializer(serializers.ModelSerializer):
             instance.referral_doc_name
         )
 
-        ret["referralDocData"] = (
-            instance.referral_doc_data
-        )
+        if "referral_doc_data" in instance.__dict__:
+            ret["referralDocData"] = instance.referral_doc_data
+        else:
+            ret["referralDocData"] = None
 
-        ret["referralDocText"] = (
-            instance.referral_doc_text
-        )
+        if "referral_doc_text" in instance.__dict__:
+            ret["referralDocText"] = instance.referral_doc_text
+        else:
+            ret["referralDocText"] = None
 
         # ====================================================
         # INVOICE
