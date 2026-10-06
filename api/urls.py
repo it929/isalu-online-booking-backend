@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     StaffLoginView,
+    StaffProfileView,
     CustomTokenRefreshView,
     HospitalEventStreamView,
     DepartmentViewSet,
@@ -14,7 +15,8 @@ from .views import (
     RoleViewSet,
     AiReportView,
     AppSettingViewSet,
-    ClinicAnalyticsViewSet
+    ClinicAnalyticsViewSet,
+    ScheduleExceptionViewSet,
 )
 
 router = DefaultRouter()
@@ -28,9 +30,11 @@ router.register(r'time-slots', CustomTimeSlotViewSet, basename='timeslot')
 router.register(r'roles', RoleViewSet, basename='role')
 router.register(r'settings', AppSettingViewSet, basename='setting')
 router.register(r'clinic-analytics', ClinicAnalyticsViewSet, basename='clinic-analytics')
+router.register(r'schedule-exceptions', ScheduleExceptionViewSet, basename='schedule-exception')
 
 urlpatterns = [
     path('auth/staff-login/', StaffLoginView.as_view(), name='staff-login'),
+    path('auth/me/', StaffProfileView.as_view(), name='staff-me'),
     path('auth/token-refresh/', CustomTokenRefreshView.as_view(), name='token-refresh'),
     path('stream/events/', HospitalEventStreamView.as_view(), name='event-stream'),
     path('analytics/ai-report/', AiReportView.as_view(), name='ai-report'),

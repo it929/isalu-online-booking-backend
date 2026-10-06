@@ -42,6 +42,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # Compresses API responses (the bookings list shrinks ~25x).
+    'django.middleware.gzip.GZipMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -138,16 +140,21 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.AnonRateThrottle',
         'rest_framework.throttling.UserRateThrottle'
     ],
+    # Limits per client IP (anonymous) or per staff account. Override in .env if needed.
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '100000/day',
-        'user': '500000/day'
-    }
+        'anon': os.getenv('THROTTLE_ANON', '5000/day'),
+        'user': os.getenv('THROTTLE_USER', '100000/day'),
+        'login': os.getenv('THROTTLE_LOGIN', '10/min'),                  # password guessing
+        'public_booking': os.getenv('THROTTLE_PUBLIC_BOOKING', '30/hour'),  # booking spam
+        'public_lookup': os.getenv('THROTTLE_PUBLIC_LOOKUP', '30/min'),    # enumeration
+    },
 }
 
 # JWT Token Configuration
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
+    # A stolen token stays useful only for one shift (was 7 days).
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=int(os.getenv('JWT_ACCESS_MINUTES', '480'))),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.getenv('JWT_REFRESH_DAYS', '7'))),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
@@ -173,6 +180,9 @@ if custom_csrf_origins and custom_csrf_origins[0]:
 else:
     CSRF_TRUSTED_ORIGINS = default_csrf_origins
 
+# Uploaded referral documents (base64 in the JSON body) are capped at 5 MB.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+
 # Production Security Headers
 if not DEBUG:
     SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True').lower() in ('true', '1')
@@ -180,6 +190,10 @@ if not DEBUG:
     CSRF_COOKIE_SECURE = True
     SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_REFERRER_POLICY = 'same-origin'
+    X_FRAME_OPTIONS = 'DENY'
+    # Enable once HTTPS works end to end (e.g. 31536000). 0 = off.
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '0'))
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -234,3 +248,23 @@ EBULKSMS_API_KEY = os.getenv('EBULKSMS_API_KEY', '').strip()
 EBULKSMS_SENDER_ID = os.getenv('EBULKSMS_SENDER_ID', 'ISALU').strip()
 EBULKSMS_API_URL = os.getenv('EBULKSMS_API_URL', 'https://api.ebulksms.com/sendsms.json').strip()
 
+
+
+# =========================================================
+# PRODUCTION SAFETY CHECKS
+# =========================================================
+import logging as _logging
+_prod_log = _logging.getLogger("clinic_backend.settings")
+_insecure_key = SECRET_KEY.startswith("django-insecure")
+if not DEBUG and _insecure_key:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        "SECRET_KEY is the insecure development placeholder. Set a long random SECRET_KEY in backend/.env "
+        "before running with DJANGO_DEBUG=False."
+    )
+if DEBUG and os.getenv("DJANGO_PRODUCTION_WARNINGS", "True").lower() in ("true", "1"):
+    _prod_log.warning(
+        "DJANGO_DEBUG=True: error pages expose code and settings. Use DJANGO_DEBUG=False in production "
+        "(see .env.production.example)."
+    )
+SHARED_CACHE = "redis" in str(CACHES.get("default", {}).get("BACKEND", "")).lower()

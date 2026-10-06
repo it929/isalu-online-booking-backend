@@ -49,8 +49,17 @@ class Command(BaseCommand):
             {'doc_id': 'doc-14', 'name': 'Specialist N', 'full_name': 'Dr. Victoria Danjuma', 'acronym': 'Specialist N', 'specialty': 'Neurology', 'department_id': 'neurology', 'qualification': 'MBBS, FMCP (Neuro)', 'qualifications': 'MBBS, FMCP (Neuro)', 'available_days': ['Monday', 'Friday'], 'time_slots': ['09:00 AM – 03:00 PM'], 'room_number': 'Neurology Clinic Wing B'},
             {'doc_id': 'doc-18', 'name': 'Specialist R', 'full_name': 'Dr. Yakubu Usman', 'acronym': 'Specialist R', 'specialty': 'Urology', 'department_id': 'urology', 'qualification': 'MBBS, FWACS (Urology)', 'qualifications': 'MBBS, FWACS (Urology)', 'available_days': ['Monday', 'Wednesday', 'Saturday'], 'time_slots': ['09:00 AM – 02:00 PM'], 'room_number': 'Urology Suite 2'},
         ]
+        # Room / duty days / time slots live on SpecialistSchedule, not Doctor
+        # (they are read-only properties on the model). Keep them aside so a
+        # schedule can be created for doctors that do not have one yet.
+        schedule_defaults = {}
         for doc in doctors:
             doc_data = doc.copy()
+            schedule_defaults[doc_data['doc_id']] = {
+                'duty_days': [d[:3] for d in doc_data.pop('available_days', [])],
+                'time_slots': doc_data.pop('time_slots', []),
+                'room': doc_data.pop('room_number', '') or 'Consultation Suite',
+            }
             dept_id_val = doc_data.pop('department_id', None)
             dept_obj = Department.objects.filter(dept_id=dept_id_val).first() if dept_id_val else None
             doc_data['department'] = dept_obj
@@ -74,6 +83,23 @@ class Command(BaseCommand):
             doc_obj = Doctor.objects.filter(doc_id=doc_id_val).first() if doc_id_val else None
             sched_data['doctor'] = doc_obj
             SpecialistSchedule.objects.get_or_create(sched_id=sched_data['sched_id'], defaults=sched_data)
+
+        # Doctors listed above without an explicit schedule get one built from
+        # their seed duty days, otherwise they could never be booked.
+        for doc_id_val, defaults in schedule_defaults.items():
+            doc_obj = Doctor.objects.filter(doc_id=doc_id_val).first()
+            if not doc_obj or not defaults['duty_days'] or doc_obj.schedules.exists():
+                continue
+            SpecialistSchedule.objects.create(
+                sched_id=f'sched-{doc_id_val}',
+                doctor=doc_obj,
+                room=defaults['room'],
+                duty_days=defaults['duty_days'],
+                shift_time=(defaults['time_slots'] or ['08:00 AM – 02:00 PM'])[0],
+                capacity=15,
+                total_weekly_capacity=15 * len(defaults['duty_days']),
+                status=True,
+            )
 
         # 4. HMO Companies
         hmos = [

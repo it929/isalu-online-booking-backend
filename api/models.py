@@ -235,16 +235,25 @@ class Doctor(models.Model):
         if not schedule:
             return []
 
-        if schedule.day_configs:
-            slots = []
+        slots = []
+        configs = schedule.day_configs if isinstance(schedule.day_configs, dict) else {}
 
-            for config in schedule.day_configs.values():
-                if isinstance(config, dict):
-                    time_value = config.get("time")
+        for config in configs.values():
+            if not isinstance(config, dict):
+                continue
+            times = (
+                config.get("shiftTimes")
+                or config.get("shift_times")
+                or config.get("time")
+            )
+            if isinstance(times, str):
+                times = [times]
+            for value in times or []:
+                value = str(value).strip()
+                if value and value not in slots:
+                    slots.append(value)
 
-                    if time_value:
-                        slots.append(str(time_value))
-
+        if slots:
             return slots
 
         return (
@@ -270,33 +279,23 @@ class Doctor(models.Model):
 
     def get_capacity_for_date(self, date_val=None):
         """
-        Returns the dynamic patient capacity for a specific date or day,
-        checking per-day config (day_configs) first, then schedule.capacity.
+        Patient capacity for a specific date, honouring per-day overrides,
+        nth-week recurrence and one-off dates. Returns 0 when the doctor
+        is not on duty that day.
         """
-        schedule = self.active_schedule
-        if not schedule:
-            return 15
+        if date_val in (None, ""):
+            return self.daily_capacity
 
-        if date_val:
-            try:
-                if isinstance(date_val, str):
-                    parsed_dt = datetime.datetime.strptime(date_val.strip(), "%Y-%m-%d").date()
-                elif isinstance(date_val, (datetime.date, datetime.datetime)):
-                    parsed_dt = date_val
-                else:
-                    parsed_dt = None
+        from .scheduling import resolve_doctor_day
 
-                if parsed_dt:
-                    day_short = parsed_dt.strftime("%a")
-                    day_name = parsed_dt.strftime("%A")
-                    configs = schedule.day_configs or {}
-                    cfg = configs.get(day_short) or configs.get(day_name)
-                    if isinstance(cfg, dict) and cfg.get("capacity") not in (None, ""):
-                        return max(int(cfg.get("capacity")), 0)
-            except Exception:
-                pass
+        resolved = resolve_doctor_day(self, date_val)
+        return resolved["capacity"] if resolved["on_duty"] else 0
 
-        return max(int(schedule.capacity or 15), 0)
+    def resolve_day(self, date_val):
+        """Full duty/capacity resolution for one date (see api.scheduling)."""
+        from .scheduling import resolve_doctor_day
+
+        return resolve_doctor_day(self, date_val)
 
     def __str__(self):
         return (
@@ -377,28 +376,23 @@ class SpecialistSchedule(models.Model):
         ordering = ["sched_id"]
 
     def save(self, *args, **kwargs):
+        # Always mirror the linked doctor so the roster never shows a stale
+        # name/specialty after the schedule is re-assigned.
         if self.doctor:
-            if (
-                not self.doctor_name
-                or self.doctor_name == "Unassigned Doctor"
-            ):
-                self.doctor_name = (
-                    self.doctor.full_name
-                    or self.doctor.name
+            self.doctor_name = (
+                self.doctor.full_name
+                or self.doctor.name
+                or self.doctor_name
+            )
+            self.specialty = (
+                self.doctor.department.name
+                if self.doctor.department
+                else (
+                    self.doctor.specialty
+                    or self.specialty
+                    or "General Medicine"
                 )
-
-            if (
-                not self.specialty
-                or self.specialty == "General Medicine"
-            ):
-                self.specialty = (
-                    self.doctor.department.name
-                    if self.doctor.department
-                    else (
-                        self.doctor.specialty
-                        or "General Medicine"
-                    )
-                )
+            )
 
         self.capacity = max(int(self.capacity or 0), 0)
         self.total_weekly_capacity = max(
@@ -558,6 +552,12 @@ class Booking(models.Model):
         db_index=True,
     )
 
+    # Lets the dashboard download only bookings changed since its last sync.
+    updated_at = models.DateTimeField(
+        default=timezone.now,
+        db_index=True,
+    )
+
     class Meta:
         ordering = ["-created_at"]
 
@@ -582,6 +582,15 @@ class Booking(models.Model):
             f"{self.patient_name}"
         )
 
+    def save(self, *args, **kwargs):
+        # Stamp every change, including save(update_fields=[...]) calls,
+        # which would otherwise skip the timestamp.
+        self.updated_at = timezone.now()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "updated_at" not in update_fields:
+            kwargs["update_fields"] = list(update_fields) + ["updated_at"]
+        super().save(*args, **kwargs)
+
     # ========================================================
     # BOOKING STATUS HELPERS
     # ========================================================
@@ -599,18 +608,80 @@ class Booking(models.Model):
         if not self.is_active:
             return False
 
+        from .scheduling import INACTIVE_BOOKING_STATUSES
+
         status = str(
             self.status or ""
         ).strip().lower()
 
-        excluded_statuses = {
-            "cancelled",
-            "canceled",
-            "rejected",
-            "declined",
-            "deleted",
-            "expired",
-            "void",
-        }
+        return status not in INACTIVE_BOOKING_STATUSES
 
-        return status not in excluded_statuses
+
+# ============================================================
+# SCHEDULE EXCEPTION (one-off cancel / move of a clinic day)
+# ============================================================
+
+class ScheduleException(models.Model):
+    """
+    A one-off change to a doctor's regular clinic on a single date.
+
+    cancel:     the clinic on `original_date` does not hold. Affected bookings
+                are cancelled and patients are notified.
+    reschedule: the clinic on `original_date` is held on `new_date` instead,
+                for that occurrence only. Affected bookings move to `new_date`
+                and patients are notified; the normal 3-hour reminder then
+                fires for the new date.
+
+    The doctor's regular schedule (SpecialistSchedule) is never modified.
+    """
+
+    ACTION_CANCEL = "cancel"
+    ACTION_RESCHEDULE = "reschedule"
+    ACTION_CHOICES = [
+        (ACTION_CANCEL, "Cancel clinic"),
+        (ACTION_RESCHEDULE, "Move clinic to another date"),
+    ]
+
+    exception_id = models.CharField(max_length=100, primary_key=True)
+
+    doctor = models.ForeignKey(
+        Doctor,
+        on_delete=models.CASCADE,
+        related_name="schedule_exceptions",
+    )
+
+    # Stored as YYYY-MM-DD strings to match Booking.date.
+    original_date = models.CharField(max_length=10, db_index=True)
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    new_date = models.CharField(max_length=10, blank=True, default="", db_index=True)
+
+    # Clinic hours and capacity on new_date (reschedule only).
+    shift_times = models.JSONField(default=list, blank=True)
+    capacity = models.PositiveIntegerField(default=0)
+
+    reason = models.TextField(blank=True, default="")
+
+    affected_refs = models.JSONField(default=list, blank=True)
+    affected_count = models.PositiveIntegerField(default=0)
+
+    # pending -> sending -> sent | partial | failed | none
+    notification_status = models.CharField(max_length=20, default="pending")
+    notified_count = models.PositiveIntegerField(default=0)
+    notification_failed_count = models.PositiveIntegerField(default=0)
+    notification_log = models.JSONField(default=list, blank=True)
+
+    created_by = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["original_date", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["doctor", "original_date"],
+                name="unique_exception_per_doctor_date",
+            ),
+        ]
+
+    def __str__(self):
+        target = f" -> {self.new_date}" if self.action == self.ACTION_RESCHEDULE else ""
+        return f"{self.doctor_id} {self.original_date} {self.action}{target}"
