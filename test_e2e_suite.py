@@ -122,6 +122,7 @@ def run_e2e_tests():
     run_permission_tests(client, today_str)
     run_duplicate_and_channel_tests(client, today_str)
     run_hmo_decline_tests(client, today_str)
+    run_disabled_hidden_tests(client, today_str)
 
     print('\n================================================================================')
     print('SUMMARY: ALL E2E INTEGRATION & REGRESSION TESTS PASSED (100% SUCCESS RATE)')
@@ -708,6 +709,36 @@ def run_hmo_decline_tests(client, today_str):
     assert a.status_code == 200 and a.data['data']['hmoStatus'] == 'Approved' and a.data['data']['hmoDeclineReason'] == ''
     assert hmo.post(f'/api/bookings/{ref}/decline-hmo/', {'reason': 'late'}, format='json').status_code == 400  # approved stays approved
     print('[R35 PASS] HMO decline: moves out of the pending queue, blocks check-in, re-open and approve clear it; HMO staff get the module.')
+
+
+def run_disabled_hidden_tests(client, today_str):
+    """R36: a disabled (trashed) booking counts and shows nowhere except Archive & Trash."""
+    avail = [d for d in client.get('/api/doctors/doc-1/available-dates/?days=40').data['availability']
+             if d['available'] and d['date'] > today_str]
+    day = avail[0]['date']
+    r = APIClient().post('/api/bookings/', {'doctorId': 'doc-1', 'date': day, 'time': '08:00 AM – 02:00 PM',
+        'patientName': 'Trash Patient', 'patientPhone': '08055554444', 'paymentType': 'Private Self-Pay'}, format='json')
+    assert r.status_code == 201, r.data
+    ref = r.data['refCode']
+    booked_before = next(d for d in client.get('/api/doctors/doc-1/available-dates/?days=40').data['availability'] if d['date'] == day)['booked']
+    summary_before = client.get('/api/bookings/summary/').data['totalBookings']
+    dup_url = '/api/bookings/duplicate-check/?doctor_id=doc-1&patient_name=Trash%20Patient&patient_phone=08055554444'
+    assert APIClient().get(dup_url).data.get('duplicate') is True
+
+    assert client.delete(f'/api/bookings/{ref}/', {'reason': 'test'}, format='json').status_code == 200
+    assert Booking.objects.filter(ref_code=ref, is_active=False).exists()           # soft-deleted, still stored
+
+    refs = lambda rows: {b.get('refCode') or b.get('ref_code') for b in rows}
+    assert ref not in refs(client.get('/api/bookings/').data)
+    assert ref not in refs(client.get('/api/bookings/sync/').data['results'])
+    assert ref in refs(client.get('/api/bookings/disabled/').data)                 # only the archive has it
+    assert client.get('/api/bookings/summary/').data['totalBookings'] == summary_before - 1
+    booked_after = next(d for d in client.get('/api/doctors/doc-1/available-dates/?days=40').data['availability'] if d['date'] == day)['booked']
+    assert booked_after == booked_before - 1, (booked_before, booked_after)
+    assert APIClient().get(f'/api/bookings/public-lookup/?ref_code={ref}').status_code == 404
+    assert APIClient().get('/api/bookings/public-lookup/?phone=08055554444').status_code == 404
+    assert APIClient().get(dup_url).data.get('duplicate') is False
+    print('[R36 PASS] Disabled bookings: hidden from lists, sync, summary, capacity, public lookup and duplicate check; kept in Archive.')
 
 
 if __name__ == '__main__':

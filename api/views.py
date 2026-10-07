@@ -1452,11 +1452,13 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Disabled (trashed) bookings exist only in Archive & Trash.
+        live = Booking.objects.filter(is_active=True).exclude(status__iexact="Disabled")
         if ref_code:
-            booking = Booking.objects.filter(ref_code__iexact=ref_code).first()
+            booking = live.filter(ref_code__iexact=ref_code).first()
         else:
             booking = (
-                Booking.objects.filter(patient_phone__iexact=phone)
+                live.filter(patient_phone__iexact=phone)
                 .order_by("-created_at").first()
             )
 
