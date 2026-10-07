@@ -121,6 +121,7 @@ def run_e2e_tests():
     run_schedule_change_tests(client, today_str)
     run_permission_tests(client, today_str)
     run_duplicate_and_channel_tests(client, today_str)
+    run_hmo_decline_tests(client, today_str)
 
     print('\n================================================================================')
     print('SUMMARY: ALL E2E INTEGRATION & REGRESSION TESTS PASSED (100% SUCCESS RATE)')
@@ -667,6 +668,46 @@ def run_duplicate_and_channel_tests(client, today_str):
     [th.start() for th in threads]; [th.join() for th in threads]
     assert len([m for m in mail.outbox if 'ISALU-RACE2' in m.subject]) == 1, len(mail.outbox)
     print('[R30 PASS] Six workers racing on one reminder send it exactly once.')
+
+
+def run_hmo_decline_tests(client, today_str):
+    """R35: HMO desk can decline a request; it leaves the pending queue and can be re-opened."""
+    avail = [d['date'] for d in client.get('/api/doctors/doc-1/available-dates/?days=40').data['availability']
+             if d['available'] and d['date'] > today_str]
+    r = APIClient().post('/api/bookings/', {'doctorId': 'doc-1', 'date': avail[-1], 'time': '08:00 AM – 02:00 PM',
+        'patientName': 'Decline Patient', 'patientPhone': '08011112222', 'paymentType': 'HMO Insurance',
+        'hmoName': 'Hygeia HMO', 'hmoPolicyCode': 'HYG-1'}, format='json')
+    assert r.status_code == 201, r.data
+    ref = r.data['refCode']
+    before = client.get('/api/bookings/summary/').data
+    assert APIClient().post(f'/api/bookings/{ref}/decline-hmo/', {'reason': 'x'}, format='json').status_code in (401, 403)
+
+    hmo = APIClient()
+    login = hmo.post('/api/auth/staff-login/', {'username': 'hmo.desk@isaluhospitals.com', 'password': 'admin123'}, format='json')
+    assert login.status_code == 200, login.data
+    assert 'hmo_declined' in login.data['user']['allowedDesks'], login.data['user']['allowedDesks']
+    hmo.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['tokens']['access']}")
+
+    d = hmo.post(f'/api/bookings/{ref}/decline-hmo/', {'reason': 'Policy inactive'}, format='json')
+    assert d.status_code == 200, d.data
+    assert d.data['data']['hmoStatus'] == 'Declined' and d.data['data']['hmoDeclineReason'] == 'Policy inactive'
+    assert d.data['data']['hmoDeclinedAt'] and d.data['data']['hmoDeclinedBy']
+    after = client.get('/api/bookings/summary/').data
+    assert after['pendingHmoCount'] == before['pendingHmoCount'] - 1, (before, after)
+    assert after['declinedHmoCount'] == before.get('declinedHmoCount', 0) + 1, (before, after)
+    assert hmo.post(f'/api/bookings/{ref}/check-in/').status_code == 400          # cannot check in while declined
+    assert hmo.patch(f'/api/bookings/{ref}/', {'hmo_decline_reason': 'tamper'}, format='json').status_code in (200, 403)
+    assert Booking.objects.get(ref_code=ref).hmo_decline_reason == 'Policy inactive'   # read-only field
+
+    o = hmo.post(f'/api/bookings/{ref}/reopen-hmo/', {}, format='json')
+    assert o.status_code == 200 and o.data['data']['hmoStatus'] == 'Awaiting Approval' and o.data['data']['hmoDeclineReason'] == ''
+    assert hmo.post(f'/api/bookings/{ref}/reopen-hmo/', {}, format='json').status_code == 400
+
+    hmo.post(f'/api/bookings/{ref}/decline-hmo/', {'reason': 'Again'}, format='json')
+    a = hmo.post(f'/api/bookings/{ref}/approve-hmo/', {'policyCode': 'HYG-1', 'authCode': 'AUTH-9'}, format='json')
+    assert a.status_code == 200 and a.data['data']['hmoStatus'] == 'Approved' and a.data['data']['hmoDeclineReason'] == ''
+    assert hmo.post(f'/api/bookings/{ref}/decline-hmo/', {'reason': 'late'}, format='json').status_code == 400  # approved stays approved
+    print('[R35 PASS] HMO decline: moves out of the pending queue, blocks check-in, re-open and approve clear it; HMO staff get the module.')
 
 
 if __name__ == '__main__':

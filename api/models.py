@@ -537,6 +537,23 @@ class Booking(models.Model):
         default="",
     )
 
+    # HMO desk decision when pre-authorization is refused.
+    hmo_decline_reason = models.TextField(
+        blank=True,
+        default="",
+    )
+
+    hmo_declined_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    hmo_declined_by = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+    )
+
     reminder_sent = models.BooleanField(
         default=False,
         db_index=True,

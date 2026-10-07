@@ -234,6 +234,9 @@ class DoctorSerializer(serializers.ModelSerializer):
             data_copy.get("department_id")
             or data_copy.get("departmentId")
             or data_copy.get("department")
+            # The "Register Specialist Doctor" form sends only the clinic name as
+            # the specialty; use it so a new doctor is linked to their clinic.
+            or (None if (self.instance and self.instance.department) else data_copy.get("specialty"))
         )
         if dept_val:
             if isinstance(dept_val, dict):
@@ -492,7 +495,7 @@ class BookingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = "__all__"
-        read_only_fields = ["ref_code", "created_at"]
+        read_only_fields = ["ref_code", "created_at", "hmo_decline_reason", "hmo_declined_at", "hmo_declined_by"]
         # Derived from the selected doctor in validate().
         extra_kwargs = {
             "doctor_name": {"required": False},
@@ -591,6 +594,9 @@ class BookingSerializer(serializers.ModelSerializer):
         ret["invoiceRef"] = instance.invoice_ref
         ret["isActive"] = instance.is_active
         ret["deleteReason"] = instance.delete_reason
+        ret["hmoDeclineReason"] = instance.hmo_decline_reason
+        ret["hmoDeclinedAt"] = instance.hmo_declined_at.isoformat() if instance.hmo_declined_at else None
+        ret["hmoDeclinedBy"] = instance.hmo_declined_by
         ret["createdAt"] = instance.created_at.isoformat() if instance.created_at else None
         return ret
 

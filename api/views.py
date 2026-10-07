@@ -239,7 +239,7 @@ ADMIN_ROLE_KEYWORDS = ("super administrator", "super admin", "hospital administr
 ALL_DESKS = [
     "helpdesk", "hmo", "cashdesk", "analytics", "monitor", "users", "all_patients",
     "checked_in_patients", "hmo_enrollees", "private_patients",
-    "create_specialist_schedule", "clinic", "disabled_bookings",
+    "create_specialist_schedule", "clinic", "disabled_bookings", "hmo_declined",
 ]
 
 
@@ -282,6 +282,9 @@ def build_staff_profile(user):
         allowed = [] if user.is_superuser else ["helpdesk", "all_patients", "checked_in_patients"]
     if admin:
         allowed = list(ALL_DESKS)
+    elif "hmo" in allowed and "hmo_declined" not in allowed:
+        # Whoever works the HMO desk also handles the requests it declined.
+        allowed.append("hmo_declined")
     return {
         "id": user.id,
         "username": user.username,
@@ -1319,11 +1322,15 @@ class BookingViewSet(viewsets.ModelViewSet):
             checked_in=Count("ref_code", filter=Q(status="Checked In", date=today_iso)),
             pending_hmo=Count(
                 "ref_code",
-                filter=Q(payment_type="HMO Insurance") & ~Q(hmo_status="Approved"),
+                filter=Q(payment_type="HMO Insurance") & ~Q(hmo_status__in=["Approved", "Declined"]),
             ),
             pending_cash=Count(
                 "ref_code",
                 filter=Q(payment_type="Private Self-Pay") & ~Q(payment_status="Cleared"),
+            ),
+            declined_hmo=Count(
+                "ref_code",
+                filter=Q(payment_type="HMO Insurance") & Q(hmo_status="Declined"),
             ),
         )
         payload = {
@@ -1333,6 +1340,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             "date": today_iso,
             "pendingHmoCount": summary.get("pending_hmo") or 0,
             "pendingCashCount": summary.get("pending_cash") or 0,
+            "declinedHmoCount": summary.get("declined_hmo") or 0,
         }
         set_cached_response(cache_key, payload)
         return Response(payload)
@@ -1634,8 +1642,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.hmo_auth_code = auth
         booking.hmo_status = "Approved"
         booking.payment_status = "Cleared"
+        # Approving a previously declined request clears the decline record.
+        booking.hmo_decline_reason = ""
+        booking.hmo_declined_at = None
+        booking.hmo_declined_by = ""
         booking.save(update_fields=[
             "hmo_policy_code", "hmo_auth_code", "hmo_status", "payment_status",
+            "hmo_decline_reason", "hmo_declined_at", "hmo_declined_by",
         ])
 
         broadcast_booking_update(
@@ -1645,6 +1658,77 @@ class BookingViewSet(viewsets.ModelViewSet):
         return Response({
             "message": f"Pre-Authorization cleared for ticket {booking.ref_code}.",
             "authCode": auth,
+            "data": BookingSerializer(booking).data,
+        })
+
+    @action(detail=True, methods=["post"], url_path="decline-hmo")
+    def decline_hmo(self, request, ref_code=None):
+        """HMO desk refuses pre-authorization: the booking moves to Declined HMO Approvals."""
+        if not is_staff_request(request):
+            return staff_required_response("decline HMO authorizations")
+
+        booking = self.get_object()
+        if str(booking.payment_type or "").strip().lower() != "hmo insurance":
+            return Response(
+                {"error": f"Ticket {booking.ref_code} is not an HMO booking."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if str(booking.hmo_status or "").strip().lower() == "approved":
+            return Response(
+                {"error": f"Ticket {booking.ref_code} is already approved and cannot be declined."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        reason = str(request.data.get("reason") or "").strip()[:1000] or "Declined by HMO desk"
+        user = request.user
+        actor = (
+            (getattr(user, "first_name", "") or "").strip()
+            or (user.get_full_name() if hasattr(user, "get_full_name") else "")
+            or getattr(user, "username", "")
+            or "HMO Desk"
+        )
+        booking.hmo_status = "Declined"
+        booking.hmo_decline_reason = reason
+        booking.hmo_declined_at = timezone.now()
+        booking.hmo_declined_by = str(actor)[:200]
+        booking.save(update_fields=[
+            "hmo_status", "hmo_decline_reason", "hmo_declined_at", "hmo_declined_by",
+        ])
+
+        broadcast_booking_update(
+            booking, event_type="HMO_DECLINED",
+            message=f"HMO pre-authorization declined for ticket {booking.ref_code}.",
+        )
+        return Response({
+            "message": f"HMO pre-authorization declined for ticket {booking.ref_code}.",
+            "data": BookingSerializer(booking).data,
+        })
+
+    @action(detail=True, methods=["post"], url_path="reopen-hmo")
+    def reopen_hmo(self, request, ref_code=None):
+        """Send a declined booking back to the HMO approval queue."""
+        if not is_staff_request(request):
+            return staff_required_response("re-open HMO authorizations")
+
+        booking = self.get_object()
+        if str(booking.hmo_status or "").strip().lower() != "declined":
+            return Response(
+                {"error": f"Ticket {booking.ref_code} is not in Declined HMO Approvals."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        booking.hmo_status = "Awaiting Approval"
+        booking.hmo_decline_reason = ""
+        booking.hmo_declined_at = None
+        booking.hmo_declined_by = ""
+        booking.save(update_fields=[
+            "hmo_status", "hmo_decline_reason", "hmo_declined_at", "hmo_declined_by",
+        ])
+        broadcast_booking_update(
+            booking, event_type="HMO_REOPENED",
+            message=f"Ticket {booking.ref_code} returned to the HMO approval queue.",
+        )
+        return Response({
+            "message": f"Ticket {booking.ref_code} is back in the HMO approval queue.",
             "data": BookingSerializer(booking).data,
         })
 
@@ -1948,7 +2032,7 @@ class AiReportView(APIView):
         pending_hmo = (
             active
             .filter(payment_type="HMO Insurance")
-            .exclude(hmo_status="Approved")
+            .exclude(hmo_status__in=["Approved", "Declined"])
             .count()
         )
         pending_cash = (
