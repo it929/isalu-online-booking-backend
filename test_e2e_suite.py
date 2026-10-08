@@ -123,6 +123,7 @@ def run_e2e_tests():
     run_duplicate_and_channel_tests(client, today_str)
     run_hmo_decline_tests(client, today_str)
     run_disabled_hidden_tests(client, today_str)
+    run_monitor_module_tests(client, today_str)
 
     print('\n================================================================================')
     print('SUMMARY: ALL E2E INTEGRATION & REGRESSION TESTS PASSED (100% SUCCESS RATE)')
@@ -739,6 +740,24 @@ def run_disabled_hidden_tests(client, today_str):
     assert APIClient().get('/api/bookings/public-lookup/?phone=08055554444').status_code == 404
     assert APIClient().get(dup_url).data.get('duplicate') is False
     print('[R36 PASS] Disabled bookings: hidden from lists, sync, summary, capacity, public lookup and duplicate check; kept in Archive.')
+
+
+def run_monitor_module_tests(client, today_str):
+    """R37: monitor operators also get the All Patients Directory module."""
+    from django.contrib.auth.models import User as _User
+    from api.models import Role as _Role, UserProfile as _Profile
+    role = _Role.objects.filter(primary_desk='monitor').first()
+    _Role.objects.filter(pk=role.pk).update(allowed_desks=['monitor'])        # an older role row without it
+    user, _ = _User.objects.get_or_create(username='monitor.e2e@isaluhospitals.com', defaults={'email': 'monitor.e2e@isaluhospitals.com'})
+    user.set_password('admin123'); user.save()
+    _Profile.objects.update_or_create(user=user, defaults={'role': role})
+    r = APIClient().post('/api/auth/staff-login/', {'username': 'monitor.e2e@isaluhospitals.com', 'password': 'admin123'}, format='json')
+    assert r.status_code == 200, r.data
+    desks = r.data['user']['allowedDesks']
+    assert 'monitor' in desks and 'all_patients' in desks, desks
+    c = APIClient(); c.credentials(HTTP_AUTHORIZATION=f"Bearer {r.data['tokens']['access']}")
+    assert c.get('/api/bookings/sync/').status_code == 200
+    print('[R37 PASS] Monitor operators get the All Patients Directory module (even on older role records).')
 
 
 if __name__ == '__main__':

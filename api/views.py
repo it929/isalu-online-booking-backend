@@ -282,9 +282,13 @@ def build_staff_profile(user):
         allowed = [] if user.is_superuser else ["helpdesk", "all_patients", "checked_in_patients"]
     if admin:
         allowed = list(ALL_DESKS)
-    elif "hmo" in allowed and "hmo_declined" not in allowed:
-        # Whoever works the HMO desk also handles the requests it declined.
-        allowed.append("hmo_declined")
+    else:
+        if "hmo" in allowed and "hmo_declined" not in allowed:
+            # Whoever works the HMO desk also handles the requests it declined.
+            allowed.append("hmo_declined")
+        if "monitor" in allowed and "all_patients" not in allowed:
+            # Monitor operators look patients up in the All Patients Directory.
+            allowed.append("all_patients")
     return {
         "id": user.id,
         "username": user.username,
@@ -570,10 +574,22 @@ PUBLIC_HIDDEN_FIELDS = (
 )
 
 
+def mask_enrollee_id(value):
+    """Show only the last 4 characters of an HMO enrollee ID to the public."""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "•" * len(value)
+    return "•" * min(6, len(value) - 4) + value[-4:]
+
+
 def public_booking_payload(booking):
     data = dict(BookingSerializer(booking).data)
     for key in PUBLIC_HIDDEN_FIELDS:
         data.pop(key, None)
+    # Patients see enough of their enrollee ID to recognise it, never all of it.
+    data["hmoEnrolleeIdMasked"] = mask_enrollee_id(getattr(booking, "hmo_policy_code", ""))
     return data
 
 
