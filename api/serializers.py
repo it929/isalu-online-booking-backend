@@ -4,6 +4,8 @@ import time
 import uuid
 
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email as validate_email_address
 from django.db import transaction
 from django.utils import timezone
 from django.utils.text import slugify
@@ -910,6 +912,7 @@ class HmoCompanySerializer(serializers.ModelSerializer):
 # ============================================================
 
 MIN_PASSWORD_LENGTH = 6
+USERNAME_PATTERN = re.compile(r"^[a-z0-9._+-]+$")
 
 
 def resolve_or_create_role(role_name):
@@ -950,7 +953,8 @@ class SystemUserSerializer(serializers.ModelSerializer):
     id = serializers.SerializerMethodField()
     user_id = serializers.SerializerMethodField()
     name = serializers.CharField(source="first_name", required=False, allow_blank=True)
-    email = serializers.EmailField(required=False, allow_blank=True)
+    # Accepts either an email address or a plain username (see validate_email).
+    email = serializers.CharField(required=False, allow_blank=True, max_length=150)
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)
     role = serializers.CharField(required=False, allow_blank=True)
     desk = serializers.CharField(required=False, allow_blank=True)
@@ -1000,14 +1004,28 @@ class SystemUserSerializer(serializers.ModelSerializer):
         return self.get_created_at(obj)
 
     def validate_email(self, value):
+        """
+        The login identifier: either an email address or a username.
+        Values containing "@" must be valid emails; anything else must be a
+        valid username (letters, digits and . _ + - only).
+        """
         value = (value or "").strip().lower()
         if not value:
             return value
+        if "@" in value:
+            try:
+                validate_email_address(value)
+            except DjangoValidationError:
+                raise serializers.ValidationError("Enter a valid email address.")
+        elif not USERNAME_PATTERN.match(value):
+            raise serializers.ValidationError(
+                "Username may contain only letters, numbers and . _ + - characters (no spaces)."
+            )
         qs = User.objects.filter(Q_email_or_username(value))
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise serializers.ValidationError("Another staff account already uses this email.")
+            raise serializers.ValidationError("Another staff account already uses this email or username.")
         return value
 
     def validate_password(self, value):
@@ -1034,6 +1052,7 @@ class SystemUserSerializer(serializers.ModelSerializer):
         ret["role"] = role_name
         ret["desk"] = desk_name
         ret["name"] = instance.first_name or instance.username
+        ret["username"] = instance.username
         return ret
 
     def create(self, validated_data):
@@ -1042,12 +1061,14 @@ class SystemUserSerializer(serializers.ModelSerializer):
         if not raw_password:
             raise serializers.ValidationError({"password": "A password is required for new staff accounts."})
 
-        email = (validated_data.get("email") or "").strip().lower()
+        identifier = (validated_data.get("email") or "").strip().lower()
         name = validated_data.get("first_name") or initial.get("name") or (
-            email.split("@")[0] if email else "Staff User"
+            identifier.split("@")[0] if identifier else "Staff User"
         )
         is_active = parse_bool_status(initial.get("status"), default=True)
-        username = email or f"user_{int(time.time() * 1000)}"
+        username = identifier or f"user_{int(time.time() * 1000)}"
+        # Only store a real email address in the email column.
+        email = identifier if "@" in identifier else ""
 
         user = User.objects.create_user(
             username=username,
@@ -1065,10 +1086,10 @@ class SystemUserSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         initial = self.initial_data or {}
 
-        email = (validated_data.get("email") or "").strip().lower()
-        if email:
-            instance.email = email
-            instance.username = email
+        identifier = (validated_data.get("email") or "").strip().lower()
+        if identifier:
+            instance.username = identifier
+            instance.email = identifier if "@" in identifier else ""
 
         name = validated_data.get("first_name") or initial.get("name")
         if name:

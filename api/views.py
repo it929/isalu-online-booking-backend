@@ -1883,7 +1883,7 @@ class SystemUserViewSet(viewsets.ModelViewSet):
         email = str(request.data.get("email") or "").strip().lower()
         if email and User.objects.filter(Q(email__iexact=email) | Q(username__iexact=email)).exists():
             return Response(
-                {"error": f"A staff account with email '{email}' already exists. Edit that account instead."},
+                {"error": f"A staff account with email/username '{email}' already exists. Edit that account instead."},
                 status=status.HTTP_409_CONFLICT,
             )
 
