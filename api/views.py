@@ -590,6 +590,11 @@ def public_booking_payload(booking):
         data.pop(key, None)
     # Patients see enough of their enrollee ID to recognise it, never all of it.
     data["hmoEnrolleeIdMasked"] = mask_enrollee_id(getattr(booking, "hmo_policy_code", ""))
+    # Patients see the doctor's public acronym (e.g. "Specialist A"), not the full name.
+    doctor = Doctor.objects.filter(doc_id__iexact=str(booking.doctor_id or "").strip()).only("acronym", "name").first()
+    acronym = (doctor.acronym or "").strip() if doctor else ""
+    data["doctorAcronym"] = acronym
+    data["doctor_acronym"] = acronym
     return data
 
 
@@ -1005,8 +1010,59 @@ class StandardResultsSetPagination(PageNumberPagination):
 
 # Fields a patient may change from the public "Check Appointments" page
 # (rescheduling). Everything else requires a staff login.
-PUBLIC_RESCHEDULE_FIELDS = {"date", "time", "reschedule_reason", "rescheduleReason", "status"}
+PUBLIC_RESCHEDULE_FIELDS = {
+    "date", "time", "reschedule_reason", "rescheduleReason", "status",
+    # A patient may switch to another doctor in the SAME clinic (checked below).
+    "doctor_id", "doctorId",
+}
 PUBLIC_RESCHEDULE_STATUSES = {"confirmed"}
+
+
+def _find_doctor(value):
+    key = str(value or "").strip()
+    if not key:
+        return None
+    return (
+        Doctor.objects.select_related("department").filter(doc_id__iexact=key).first()
+        or Doctor.objects.select_related("department").filter(full_name__iexact=key).first()
+        or Doctor.objects.select_related("department").filter(name__iexact=key).first()
+    )
+
+
+def _doctor_clinic_name(doctor):
+    if doctor.department_id:
+        return doctor.department.name
+    return doctor.specialty or ""
+
+
+def public_doctor_switch_error(booking, new_doctor_ref):
+    """
+    Validate a patient-initiated doctor change during rescheduling.
+    Returns an error message, or None when the switch is allowed.
+    Duty day, capacity and duplicate checks still run in the serializer.
+    """
+    new_doc = _find_doctor(new_doctor_ref)
+    if not new_doc:
+        return "The selected doctor could not be found."
+    if new_doc.doc_id.lower() == str(booking.doctor_id or "").strip().lower():
+        return None
+    if not new_doc.status:
+        return "The selected doctor is not currently available for appointments."
+
+    old_doc = _find_doctor(booking.doctor_id)
+    if old_doc and old_doc.department_id and new_doc.department_id:
+        same_clinic = old_doc.department_id == new_doc.department_id
+    else:
+        old_clinic = _doctor_clinic_name(old_doc) if old_doc else (booking.doctor_specialty or "")
+        same_clinic = bool(old_clinic) and old_clinic.strip().lower() == _doctor_clinic_name(new_doc).strip().lower()
+    if not same_clinic:
+        return "You can only switch to another doctor in the same clinic. Please contact reception to change clinics."
+
+    patient_type = "HMO Insurance" if "hmo" in str(booking.payment_type or "").lower() else "Private Self-Pay"
+    accepted = new_doc.accepted_patient_types or ["Private Self-Pay", "HMO Insurance"]
+    if patient_type not in accepted:
+        return f"The selected doctor does not accept {patient_type} patients. Please choose another doctor."
+    return None
 
 LIFECYCLE_STATUSES = {"Pending", "Confirmed", "Checked In", "Completed", "Cancelled"}
 
@@ -1238,6 +1294,11 @@ class BookingViewSet(viewsets.ModelViewSet):
                     {"error": "This appointment can no longer be rescheduled online. Please contact reception."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            new_doctor_ref = request.data.get("doctor_id") or request.data.get("doctorId")
+            if ({"doctor_id", "doctorId"} & keys):
+                switch_error = public_doctor_switch_error(booking, new_doctor_ref)
+                if switch_error:
+                    return Response({"error": switch_error}, status=status.HTTP_400_BAD_REQUEST)
             return self._save_with_serializer(request, booking, partial=True)
 
         # Desk staff may only change the lifecycle status; editing booking
