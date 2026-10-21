@@ -6,20 +6,15 @@ Generated for Isalu Hospitals Medical Booking Platform.
 from pathlib import Path
 from datetime import timedelta
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Always read backend/.env (next to manage.py), whichever folder the server is
-# started from. Values already set in the system environment win.
-ENV_FILE = BASE_DIR / ".env"
-try:
-    from dotenv import load_dotenv
-    DOTENV_AVAILABLE = True
-    load_dotenv(ENV_FILE)
-except ImportError:
-    DOTENV_AVAILABLE = False
-
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-isalu-clinic-booking-key-2026-secure-key!')
+SECRET_KEY = os.getenv("SECRET_KEY", "unsafe")
 
 DEBUG = os.getenv('DJANGO_DEBUG', 'True').lower() in ('true', '1')
 
@@ -103,7 +98,7 @@ if redis_hosts:
         "default": {
             "BACKEND": "channels_redis.core.RedisChannelLayer",
             "CONFIG": {
-                "hosts": redis_hosts,
+                "hosts": [os.getenv("REDIS_URL", "redis://redis:6379/0")],
             },
         },
     }
@@ -127,9 +122,13 @@ else:
 
 # Database
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    "default": {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": os.getenv("DB_NAME", "isalu"),
+        "USER": os.getenv("DB_USER"),
+        "PASSWORD": os.getenv("DB_PASSWORD"),
+        "HOST": os.getenv("DB_HOST", "db"),
+        "PORT": os.getenv("DB_PORT", "3306"),
     }
 }
 
@@ -216,7 +215,7 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = 'static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATIC_ROOT = "/var/www/isalu"
 
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -252,27 +251,6 @@ EBULKSMS_USERNAME = os.getenv('EBULKSMS_USERNAME', '').strip()
 EBULKSMS_API_KEY = os.getenv('EBULKSMS_API_KEY', '').strip()
 EBULKSMS_SENDER_ID = os.getenv('EBULKSMS_SENDER_ID', 'ISALU').strip()
 EBULKSMS_API_URL = os.getenv('EBULKSMS_API_URL', 'https://api.ebulksms.com/sendsms.json').strip()
-
-
-# =========================================================
-# ONLINE PAYMENT (PAYSTACK) & BOOKING RULES
-# =========================================================
-# Private self-pay patients pay the clinic's consultation fee online before
-# their ticket is issued. Leave PAYSTACK_SECRET_KEY empty to switch online
-# payment off (patients then pay at the cashdesk, as before).
-PAYSTACK_SECRET_KEY = os.getenv('PAYSTACK_SECRET_KEY', '').strip()
-PAYSTACK_PUBLIC_KEY = os.getenv('PAYSTACK_PUBLIC_KEY', '').strip()
-PAYSTACK_API_URL = os.getenv('PAYSTACK_API_URL', 'https://api.paystack.co').strip().rstrip('/')
-# Public address of the booking site; Paystack sends patients back to
-# <PUBLIC_SITE_URL>/book after paying. Example: https://book.isaluhospitals.com
-PUBLIC_SITE_URL = os.getenv('PUBLIC_SITE_URL', '').strip().rstrip('/')
-# How long an unpaid online booking holds its slot.
-PAYMENT_HOLD_MINUTES = int(os.getenv('PAYMENT_HOLD_MINUTES', '30'))
-# Private self-pay patients booking online must pay before a ticket is issued.
-# Set to False only to go back to "pay at the cashdesk" (not recommended).
-PRIVATE_BOOKINGS_REQUIRE_PAYMENT = os.getenv('PRIVATE_BOOKINGS_REQUIRE_PAYMENT', 'True').lower() in ('true', '1')
-# HMO online booking for a clinic opens this many hours before it starts (closes 10 minutes before).
-HMO_MIN_NOTICE_HOURS = int(os.getenv('HMO_MIN_NOTICE_HOURS', '48'))
 
 
 
