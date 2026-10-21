@@ -111,6 +111,15 @@ class Department(models.Model):
         default=True,
     )
 
+    # Consultation fee in Naira that private self-pay patients pay online
+    # (Paystack) when booking this clinic. 0 = no online payment; the
+    # patient pays at the cashdesk as before.
+    consultation_fee = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+    )
+
     class Meta:
         ordering = ["name"]
 
@@ -554,6 +563,40 @@ class Booking(models.Model):
         default="",
     )
 
+    # ---- Online payment (Paystack), private self-pay only -------------
+    # A booking waiting for payment holds its slot until payment_expires_at.
+    fee_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Clinic fee charged online when the booking was made (Naira).",
+    )
+
+    payment_reference = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        db_index=True,
+    )
+
+    payment_expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    amount_paid = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    paid_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
     reminder_sent = models.BooleanField(
         default=False,
         db_index=True,
@@ -625,11 +668,15 @@ class Booking(models.Model):
         if not self.is_active:
             return False
 
-        from .scheduling import INACTIVE_BOOKING_STATUSES
+        from .scheduling import AWAITING_PAYMENT, INACTIVE_BOOKING_STATUSES
 
         status = str(
             self.status or ""
         ).strip().lower()
+
+        if status == AWAITING_PAYMENT.lower():
+            # An unpaid online booking holds its slot only until the hold expires.
+            return bool(self.payment_expires_at and self.payment_expires_at > timezone.now())
 
         return status not in INACTIVE_BOOKING_STATUSES
 

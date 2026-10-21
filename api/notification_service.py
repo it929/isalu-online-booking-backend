@@ -573,7 +573,9 @@ def process_3hour_appointment_reminders(hours_ahead: int = 3, force: bool = Fals
     query = Booking.objects.filter(
         date__in=[today_str, tomorrow_str],
         is_active=True
-    ).exclude(status__iexact="Cancelled").exclude(status__iexact="Disabled")
+    ).exclude(status__iexact="Cancelled").exclude(status__iexact="Disabled").exclude(
+        status__in=["Awaiting Payment", "Payment Expired"]  # unpaid online bookings get no reminders
+    )
 
     if not force:
         query = query.filter(reminder_sent=False)
@@ -636,7 +638,9 @@ def process_appointment_reminders(target_date: str = None, days_ahead: int = 1, 
     query = Booking.objects.filter(
         date=target_date,
         is_active=True
-    ).exclude(status__iexact="Cancelled").exclude(status__iexact="Disabled")
+    ).exclude(status__iexact="Cancelled").exclude(status__iexact="Disabled").exclude(
+        status__in=["Awaiting Payment", "Payment Expired"]  # unpaid online bookings get no reminders
+    )
 
     if not force:
         query = query.filter(reminder_sent=False)

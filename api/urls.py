@@ -19,6 +19,8 @@ from .views import (
     ScheduleExceptionViewSet,
 )
 
+from .payment_views import PaymentConfigView, PaystackWebhookView, PaymentReportView, StartPaymentView, VerifyPaymentView
+
 router = DefaultRouter()
 router.register(r'departments', DepartmentViewSet, basename='department')
 router.register(r'doctors', DoctorViewSet, basename='doctor')
@@ -38,5 +40,10 @@ urlpatterns = [
     path('auth/token-refresh/', CustomTokenRefreshView.as_view(), name='token-refresh'),
     path('stream/events/', HospitalEventStreamView.as_view(), name='event-stream'),
     path('analytics/ai-report/', AiReportView.as_view(), name='ai-report'),
+    path('payments/config/', PaymentConfigView.as_view(), name='payment-config'),
+    path('payments/start/', StartPaymentView.as_view(), name='payment-start'),
+    path('payments/verify/', VerifyPaymentView.as_view(), name='payment-verify'),
+    path('payments/paystack-webhook/', PaystackWebhookView.as_view(), name='paystack-webhook'),
+    path('payments/report/', PaymentReportView.as_view(), name='payment-report'),
     path('', include(router.urls)),
 ]

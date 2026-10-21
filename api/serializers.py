@@ -141,7 +141,11 @@ class DepartmentSerializer(serializers.ModelSerializer):
             "department_id": "dept_id",
             "iconName": "icon_name",
             "doctorCount": "doctor_count",
+            "consultationFee": "consultation_fee",
+            "fee": "consultation_fee",
         })
+        if "consultation_fee" in data_copy and data_copy.get("consultation_fee") in ("", None):
+            data_copy["consultation_fee"] = 0
 
         if self.instance:
             # The primary key can never be changed through the API.
@@ -163,6 +167,15 @@ class DepartmentSerializer(serializers.ModelSerializer):
 
         return super().to_internal_value(data_copy)
 
+    def validate_consultation_fee(self, value):
+        if value is None:
+            return 0
+        if value < 0:
+            raise serializers.ValidationError("The consultation fee can't be negative.")
+        if value > 10_000_000:
+            raise serializers.ValidationError("The consultation fee looks too large. Enter the amount in Naira.")
+        return value
+
     def validate_dept_id(self, value):
         value = str(value).strip()
         if not value:
@@ -183,6 +196,9 @@ class DepartmentSerializer(serializers.ModelSerializer):
         ret["status"] = instance.status
         ret["location"] = getattr(instance, "location", None) or "Main Building"
         ret["iconName"] = instance.icon_name
+        fee = float(instance.consultation_fee or 0)
+        ret["consultation_fee"] = fee
+        ret["consultationFee"] = fee
 
         doc_count = instance.doctors.count()
         ret["doctor_count"] = doc_count if doc_count > 0 else (instance.doctor_count or 0)
@@ -279,6 +295,9 @@ class DoctorSerializer(serializers.ModelSerializer):
 
         ret["departmentId"] = instance.department.dept_id if instance.department else ""
         ret["department_id"] = ret["departmentId"]
+        fee = float(instance.department.consultation_fee or 0) if instance.department else 0.0
+        ret["consultationFee"] = fee
+        ret["consultation_fee"] = fee
         if instance.department:
             ret["department"] = {
                 "dept_id": instance.department.dept_id,
@@ -286,6 +305,7 @@ class DoctorSerializer(serializers.ModelSerializer):
                 "name": instance.department.name,
                 "description": instance.department.description,
                 "icon_name": instance.department.icon_name,
+                "consultation_fee": fee,
             }
         else:
             ret["department"] = None
@@ -497,7 +517,11 @@ class BookingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = "__all__"
-        read_only_fields = ["ref_code", "created_at", "hmo_decline_reason", "hmo_declined_at", "hmo_declined_by"]
+        read_only_fields = [
+            "ref_code", "created_at", "hmo_decline_reason", "hmo_declined_at", "hmo_declined_by",
+            # Online payment details are only ever set by the server.
+            "fee_amount", "payment_reference", "payment_expires_at", "amount_paid", "paid_at",
+        ]
         # Derived from the selected doctor in validate().
         extra_kwargs = {
             "doctor_name": {"required": False},
@@ -600,6 +624,11 @@ class BookingSerializer(serializers.ModelSerializer):
         ret["hmoDeclinedAt"] = instance.hmo_declined_at.isoformat() if instance.hmo_declined_at else None
         ret["hmoDeclinedBy"] = instance.hmo_declined_by
         ret["createdAt"] = instance.created_at.isoformat() if instance.created_at else None
+        ret["feeAmount"] = float(instance.fee_amount) if instance.fee_amount is not None else None
+        ret["amountPaid"] = float(instance.amount_paid) if instance.amount_paid is not None else None
+        ret["paidAt"] = instance.paid_at.isoformat() if instance.paid_at else None
+        ret["paymentReference"] = instance.payment_reference
+        ret["paymentExpiresAt"] = instance.payment_expires_at.isoformat() if instance.payment_expires_at else None
         return ret
 
     # ---------------------------------------------------------------
@@ -613,10 +642,21 @@ class BookingSerializer(serializers.ModelSerializer):
             for key in ("patient_name", "patient_phone")
         )
 
-    def _reject_duplicate(self, doctor, name, phone):
-        existing = find_duplicate_booking(
-            doctor, name, phone, exclude_ref=self.instance.ref_code if self.instance else None
-        )
+    def _reject_duplicate(self, doctor, name, phone, date):
+        from .scheduling import AWAITING_PAYMENT, PAYMENT_EXPIRED
+        exclude = self.instance.ref_code if self.instance else None
+        existing = find_duplicate_booking(doctor, name, phone, exclude_ref=exclude, date=date)
+        # The patient's own unpaid online booking (e.g. they went back to change
+        # the date) is released instead of blocking the new attempt.
+        guard = 0
+        while existing is not None and str(existing.status).lower() == AWAITING_PAYMENT.lower() and guard < 5:
+            Booking.objects.filter(ref_code=existing.ref_code).update(
+                status=PAYMENT_EXPIRED,
+                delete_reason="Replaced by a newer booking attempt from the same patient.",
+                updated_at=timezone.now(),
+            )
+            existing = find_duplicate_booking(doctor, name, phone, exclude_ref=exclude, date=date)
+            guard += 1
         if existing is not None:
             raise self._error(
                 duplicate_message(existing, existing.clinic_label),
@@ -675,6 +715,7 @@ class BookingSerializer(serializers.ModelSerializer):
                     _resolve_doctor(inst.doctor_id),
                     data.get("patient_name", inst.patient_name),
                     data.get("patient_phone", inst.patient_phone),
+                    inst.date,
                 )
             return data
 
@@ -741,11 +782,36 @@ class BookingSerializer(serializers.ModelSerializer):
                 f"{ordinals[week_of_month(appt_date)]} {day_name} of the month)."
             )
 
-        # ---- one upcoming appointment per patient per clinic ---------
+        # ---- HMO booking window (online only) -------------------------
+        payment_type = data.get("payment_type", inst.payment_type if inst else "")
+        request = self.context.get("request")
+        from .views import is_staff_request  # local import: views imports this module
+        if request is not None and not is_staff_request(request):
+            from . import payments
+            opens_at = payments.hmo_too_early(
+                appt_date, data.get("time") or (inst.time if inst else ""), doc_obj
+            ) if payments.is_hmo(payment_type) else None
+            if opens_at is not None:
+                earliest = payments.earliest_hmo_slot(doc_obj, exclude_ref=inst.ref_code if inst else None)
+                doctor_label = (doc_obj.acronym or doc_obj.name or "this doctor").strip()
+                raise self._error(
+                    payments.hmo_notice_message(
+                        doctor_label, opens_at, earliest,
+                        clinic_start=payments.appointment_start(appt_date, data.get("time") or (inst.time if inst else ""), doc_obj),
+                    ),
+                    hmo_notice=True,
+                    hmo_notice_hours=payments.hmo_notice_hours(),
+                    hmo_opens_at=timezone.localtime(opens_at).isoformat(),
+                    earliest_hmo_date=earliest["date"] if earliest else None,
+                    earliest_hmo_time=earliest["time_window"] if earliest else None,
+                )
+
+        # ---- one appointment per patient per clinic per day -----------
         self._reject_duplicate(
             doc_obj,
             data.get("patient_name", inst.patient_name if inst else ""),
             data.get("patient_phone", inst.patient_phone if inst else ""),
+            data["date"],
         )
 
         # ---- capacity ------------------------------------------------
@@ -820,6 +886,7 @@ class BookingSerializer(serializers.ModelSerializer):
                 Doctor.objects.filter(doc_id=validated_data.get("doctor_id")).select_related("department").first(),
                 validated_data.get("patient_name"),
                 validated_data.get("patient_phone"),
+                validated_data.get("date"),
             )
             validated_data["ref_code"] = self._generate_ref_code()
             return Booking.objects.create(**validated_data)

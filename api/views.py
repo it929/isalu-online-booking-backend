@@ -240,6 +240,7 @@ ALL_DESKS = [
     "helpdesk", "hmo", "cashdesk", "analytics", "monitor", "users", "all_patients",
     "checked_in_patients", "hmo_enrollees", "private_patients",
     "create_specialist_schedule", "clinic", "disabled_bookings", "hmo_declined",
+    "booking_payments",
 ]
 
 
@@ -447,6 +448,27 @@ def first_error_message(errors, fallback="Invalid request."):
     if isinstance(errors, list) and errors:
         return str(errors[0])
     return fallback
+
+
+def flatten_error_detail(detail):
+    """
+    Turn DRF's {"error": ["msg"], "flag": ["True"]} into {"error": "msg", "flag": True}
+    so the booking pages get one clear message plus usable extra fields.
+    """
+    if not isinstance(detail, dict):
+        return {"error": first_error_message(detail)}
+    body = {}
+    for key, value in detail.items():
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, str):
+            value = str(value)
+            if value in ("True", "False"):
+                value = value == "True"
+        body[key] = value
+    if not isinstance(body.get("error"), str):
+        body["error"] = first_error_message(detail)
+    return body
 
 
 def error_response(serializer_errors, http_status=status.HTTP_400_BAD_REQUEST):
@@ -773,6 +795,8 @@ class DoctorViewSet(viewsets.ModelViewSet):
         permission_classes=[AllowAny],
     )
     def available_dates(self, request, *args, **kwargs):
+        from . import payments
+        payments.expire_payment_holds()
         doctor = self.get_object()
 
         days_ahead = max(1, min(safe_int(request.query_params.get("days"), 90), 365))
@@ -820,6 +844,17 @@ class DoctorViewSet(viewsets.ModelViewSet):
                     on_duty and not is_full and not is_past and bool(doctor.status)
                 ),
             })
+            slot_start = payments.appointment_start(day, resolved["shift"] or "", doctor) if on_duty else None
+            # HMO: bookable from 48 hours until 10 minutes before the clinic starts.
+            hmo_state = payments.hmo_window_state(slot_start) if slot_start else "closed"
+            hmo_ok = bool(availability_details[-1]["available"] and hmo_state == "open")
+            availability_details[-1]["hmo_available"] = hmo_ok
+            availability_details[-1]["hmoAvailable"] = hmo_ok
+            availability_details[-1]["hmo_window"] = hmo_state
+            availability_details[-1]["hmo_opens_at"] = (
+                timezone.localtime(payments.hmo_window(slot_start)[0]).isoformat() if slot_start else None
+            )
+            availability_details[-1]["starts_at"] = slot_start.isoformat() if slot_start else None
 
         return Response({
             "doctor_id": doctor.doc_id,
@@ -829,6 +864,16 @@ class DoctorViewSet(viewsets.ModelViewSet):
             "days": days_ahead,
             "dates": dates,
             "availability": availability_details,
+            # HMO booking opens this many hours before a clinic and closes
+            # hmo_close_minutes before it starts.
+            "hmo_min_notice_hours": payments.hmo_notice_hours(),
+            "hmo_close_minutes": payments.HMO_CLOSE_MINUTES,
+            "earliest_hmo_date": next((d["date"] for d in availability_details if d["hmo_available"]), None),
+            "consultation_fee": float(payments.clinic_fee(doctor)),
+            "online_payment_required": payments.requires_online_payment(doctor, "Private Self-Pay"),
+            # "" when private patients can book (and pay) online; otherwise the reason.
+            "private_booking_problem": payments.private_booking_problem(doctor)
+            if payments.requires_online_payment(doctor, "Private Self-Pay") else "",
         })
 
     def sync_linked_schedules(self, doctor):
@@ -1081,6 +1126,14 @@ class BookingViewSet(viewsets.ModelViewSet):
     permission_classes = [AllowAny]
     lookup_field = "ref_code"
 
+    def handle_exception(self, exc):
+        # Booking errors carry one patient-facing message plus extra fields
+        # (e.g. hmo_notice, earliest_hmo_date, payment_required); return them flat.
+        from rest_framework.exceptions import ValidationError as DRFValidationError
+        if isinstance(exc, DRFValidationError) and isinstance(exc.detail, dict):
+            return Response(flatten_error_detail(exc.detail), status=status.HTTP_400_BAD_REQUEST)
+        return super().handle_exception(exc)
+
     def get_throttles(self):
         throttles = super().get_throttles()
         if self.action == "create":
@@ -1121,6 +1174,20 @@ class BookingViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         overrides = {}
         if not is_staff_request(self.request):
+            from . import payments
+            doctor = Doctor.objects.select_related("department").filter(
+                doc_id=serializer.validated_data.get("doctor_id")
+            ).first()
+            if payments.requires_online_payment(doctor, serializer.validated_data.get("payment_type", "")):
+                from rest_framework.exceptions import ValidationError as DRFValidationError
+                problem = payments.private_booking_problem(doctor)
+                raise DRFValidationError({
+                    "error": problem or (
+                        "Private appointments are paid online before the ticket is issued. "
+                        "Please use the Pay button to continue."
+                    ),
+                    "payment_required": True,
+                })
             # Payment / HMO / lifecycle fields are controlled by the desks,
             # never by the public booking form.
             is_hmo = "hmo" in str(serializer.validated_data.get("payment_type", "")).lower()
@@ -1181,6 +1248,8 @@ class BookingViewSet(viewsets.ModelViewSet):
         if not is_staff_request(request):
             return staff_required_response("view the patient booking registry")
 
+        from .payments import expire_payment_holds
+        expire_payment_holds()
         server_time = timezone.now()
         since_raw = request.query_params.get("since")
         since = None
@@ -1289,6 +1358,11 @@ class BookingViewSet(viewsets.ModelViewSet):
                 or new_status not in PUBLIC_RESCHEDULE_STATUSES
             ):
                 return staff_required_response("modify this booking")
+            if str(booking.status).lower() == "awaiting payment":
+                return Response(
+                    {"error": "This booking isn't paid yet. Finish paying first, or start a new booking."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if not booking.counts_toward_capacity or booking.status in ("Checked In", "Completed"):
                 return Response(
                     {"error": "This appointment can no longer be rescheduled online. Please contact reception."},
@@ -1403,7 +1477,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             ),
             pending_cash=Count(
                 "ref_code",
-                filter=Q(payment_type="Private Self-Pay") & ~Q(payment_status="Cleared"),
+                filter=Q(payment_type="Private Self-Pay") & ~Q(payment_status="Cleared") & ~Q(status__in=["Awaiting Payment", "Payment Expired"]),
             ),
             declined_hmo=Count(
                 "ref_code",
@@ -1505,6 +1579,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             request.query_params.get("patient_name"),
             request.query_params.get("patient_phone"),
             exclude_ref=request.query_params.get("exclude_ref") or None,
+            date=request.query_params.get("date") or None,
         )
         if not existing:
             return Response({"duplicate": False})
@@ -1593,7 +1668,8 @@ class BookingViewSet(viewsets.ModelViewSet):
         if doctor:
             from .duplicates import duplicate_message, find_duplicate_booking
             existing = find_duplicate_booking(
-                doctor, booking.patient_name, booking.patient_phone, exclude_ref=booking.ref_code
+                doctor, booking.patient_name, booking.patient_phone,
+                exclude_ref=booking.ref_code, date=booking.date,
             )
             if existing is not None:
                 return Response(
@@ -1675,6 +1751,11 @@ class BookingViewSet(viewsets.ModelViewSet):
                         "Route patient to HMO Desk first."
                     )
                 },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if str(booking.status).lower() in ("awaiting payment", "payment expired"):
+            return Response(
+                {"error": f"Ticket {booking.ref_code} was not paid online. Ask the patient to book again or pay at the cashdesk."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if booking.payment_status == "Pending":
@@ -2118,6 +2199,7 @@ class AiReportView(APIView):
             active
             .filter(payment_type="Private Self-Pay")
             .exclude(payment_status="Cleared")
+            .exclude(status__in=["Awaiting Payment", "Payment Expired"])
             .count()
         )
 

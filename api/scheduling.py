@@ -80,7 +80,12 @@ _RANGE_RE = re.compile(
 )
 
 # Booking statuses that must NOT consume a doctor's daily capacity.
+# Online payment statuses (private self-pay via Paystack).
+AWAITING_PAYMENT = "Awaiting Payment"   # slot held while the patient pays
+PAYMENT_EXPIRED = "Payment Expired"     # hold ran out before payment
+
 INACTIVE_BOOKING_STATUSES = (
+    "payment expired",
     "disabled",
     "cancelled",
     "canceled",
@@ -614,7 +619,13 @@ def capacity_bookings_qs(queryset=None):
     if queryset is None:
         from .models import Booking
         queryset = Booking.objects.all()
-    return queryset.filter(is_active=True).exclude(inactive_status_q())
+    from django.utils import timezone as _tz
+    return (
+        queryset.filter(is_active=True)
+        .exclude(inactive_status_q())
+        # Unpaid online bookings stop holding their slot once the hold expires.
+        .exclude(Q(status__iexact=AWAITING_PAYMENT) & (Q(payment_expires_at__isnull=True) | Q(payment_expires_at__lte=_tz.now())))
+    )
 
 
 def count_doctor_bookings(doctor_id, date_val, exclude_ref=None):
