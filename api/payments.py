@@ -84,6 +84,15 @@ def is_hmo(payment_type):
     return "hmo" in str(payment_type or "").lower()
 
 
+def is_company(payment_type):
+    return "company" in str(payment_type or "").lower()
+
+
+def is_sponsored(payment_type):
+    """HMO and Company patients: covered by their sponsor, approved at the HMO desk."""
+    return is_hmo(payment_type) or is_company(payment_type)
+
+
 def clinic_fee(doctor):
     """The doctor's clinic consultation fee in Naira (Decimal), or 0."""
     if doctor is None or not doctor.department_id:
@@ -102,7 +111,7 @@ def requires_online_payment(doctor, payment_type):
     (unless PRIVATE_BOOKINGS_REQUIRE_PAYMENT is switched off, in which case only
     clinics with a fee are paid online and the rest pay at the cashdesk).
     """
-    if is_hmo(payment_type):
+    if is_sponsored(payment_type):
         return False
     if payment_mandatory():
         return True
@@ -238,20 +247,23 @@ def _when(dt):
     return local.strftime("%A, %d %B %Y, %I:%M %p").replace(" 0", " ")
 
 
-def hmo_notice_message(doctor_label, opens_at, bookable_now=None, clinic_start=None):
+def hmo_notice_message(doctor_label, opens_at, bookable_now=None, clinic_start=None, sponsor="HMO"):
+    """sponsor: "HMO" or "company" (Company patients follow the same window)."""
     hours = hmo_notice_hours()
+    who = "HMO" if sponsor == "HMO" else "Company"
+    yours = "your HMO" if sponsor == "HMO" else "your company"
     text = (
-        f"HMO patients can book a clinic from {hours} hours before it starts until {HMO_CLOSE_MINUTES} minutes "
-        "before it starts, if space is still available. This gives us time to get approval from your HMO. "
-        + (f"HMO booking for the {doctor_label} clinic on {timezone.localtime(clinic_start).strftime('%A, %d %B').replace(' 0', ' ')} "
-           if clinic_start else f"HMO booking for this {doctor_label} clinic ")
+        f"{who} patients can book a clinic from {hours} hours before it starts until {HMO_CLOSE_MINUTES} minutes "
+        f"before it starts, if space is still available. This gives us time to get approval from {yours}. "
+        + (f"{who} booking for the {doctor_label} clinic on {timezone.localtime(clinic_start).strftime('%A, %d %B').replace(' 0', ' ')} "
+           if clinic_start else f"{who} booking for this {doctor_label} clinic ")
         + f"opens on {_when(opens_at)}."
     )
     if bookable_now:
-        text += f" The next clinic you can book with your HMO now is {timezone.localtime(bookable_now['start']).strftime('%A, %d %B %Y').replace(' 0', ' ')}."
+        text += f" The next clinic you can book with {yours} now is {timezone.localtime(bookable_now['start']).strftime('%A, %d %B %Y').replace(' 0', ' ')}."
     return text + (
         " If you can't wait, book as Private Self-Pay and pay online now. Private patients can book "
-        "any open space at any time, so this space may be taken before HMO booking opens."
+        f"any open space at any time, so this space may be taken before {who} booking opens."
     )
 
 

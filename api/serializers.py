@@ -14,6 +14,7 @@ from rest_framework import serializers
 from .models import (
     AppSetting,
     Booking,
+    Company,
     CustomTimeSlot,
     Department,
     Doctor,
@@ -603,6 +604,9 @@ class BookingSerializer(serializers.ModelSerializer):
         ret["paymentStatus"] = instance.payment_status
         ret["paymentMethod"] = instance.payment_method
         ret["hmoName"] = instance.hmo_name
+        # Company patients: the company's name is kept in hmo_name (the sponsor
+        # field), so the HMO desk shows and approves them like HMO bookings.
+        ret["companyName"] = instance.hmo_name if is_company_type(instance.payment_type) else ""
         ret["hmoPolicyCode"] = instance.hmo_policy_code
         ret["hmoAuthCode"] = instance.hmo_auth_code
         ret["hmoStatus"] = instance.hmo_status
@@ -681,6 +685,37 @@ class BookingSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Referral letter is too large (maximum 5 MB).")
         return value
 
+    def _validate_company(self, data):
+        """
+        Company patients pick their company from the Companies list (no enrollee
+        ID needed). The company name is stored in hmo_name, like an HMO's name.
+        """
+        inst = self.instance
+        payment_type = data.get("payment_type", inst.payment_type if inst else "")
+        if not is_company_type(payment_type):
+            return
+        data["payment_type"] = COMPANY_PAYMENT_TYPE
+        changed = inst is None or "hmo_name" in data or "payment_type" in data
+        if not changed:
+            return
+        name = " ".join(str(data.get("hmo_name", inst.hmo_name if inst else "") or "").split())
+        company = Company.objects.filter(name__iexact=name).first() if name else None
+        request = self.context.get("request")
+        from .views import is_staff_request  # local import: views imports this module
+        staff = request is not None and is_staff_request(request)
+        if company is None or (not company.status and not staff):
+            if staff and name and name.lower() not in ("n/a", "none"):
+                data["hmo_name"] = name
+            else:
+                raise self._error(
+                    "Please choose your company from the list. If your company isn't listed, "
+                    "book as Private Self-Pay or contact the hospital.",
+                    company_required=True,
+                )
+        else:
+            data["hmo_name"] = company.name
+        data["hmo_policy_code"] = ""
+
     def _scheduling_changed(self, data):
         if self.instance is None:
             return True
@@ -707,6 +742,7 @@ class BookingSerializer(serializers.ModelSerializer):
         """
         data = super().validate(data)
         inst = self.instance
+        self._validate_company(data)
 
         if not self._scheduling_changed(data):
             # Editing the patient's name/phone must not create a duplicate either.
@@ -790,7 +826,7 @@ class BookingSerializer(serializers.ModelSerializer):
             from . import payments
             opens_at = payments.hmo_too_early(
                 appt_date, data.get("time") or (inst.time if inst else ""), doc_obj
-            ) if payments.is_hmo(payment_type) else None
+            ) if payments.is_sponsored(payment_type) else None
             if opens_at is not None:
                 earliest = payments.earliest_hmo_slot(doc_obj, exclude_ref=inst.ref_code if inst else None)
                 doctor_label = (doc_obj.acronym or doc_obj.name or "this doctor").strip()
@@ -798,6 +834,7 @@ class BookingSerializer(serializers.ModelSerializer):
                     payments.hmo_notice_message(
                         doctor_label, opens_at, earliest,
                         clinic_start=payments.appointment_start(appt_date, data.get("time") or (inst.time if inst else ""), doc_obj),
+                        sponsor="company" if payments.is_company(payment_type) else "HMO",
                     ),
                     hmo_notice=True,
                     hmo_notice_hours=payments.hmo_notice_hours(),
@@ -972,6 +1009,71 @@ class HmoCompanySerializer(serializers.ModelSerializer):
         ret["id"] = instance.hmo_id
         ret["contactPerson"] = instance.contact_person
         return ret
+
+
+# ============================================================
+# COMPANY SERIALIZER
+# ============================================================
+
+COMPANY_PAYMENT_TYPE = "Company"
+
+
+def is_company_type(payment_type):
+    return "company" in str(payment_type or "").lower()
+
+
+class CompanySerializer(serializers.ModelSerializer):
+    company_id = serializers.CharField(required=False)
+    name = serializers.CharField(required=False)
+    email = serializers.EmailField(required=False, allow_blank=True)
+
+    class Meta:
+        model = Company
+        fields = "__all__"
+        read_only_fields = ("created_at",)
+
+    def to_internal_value(self, data):
+        data_copy = _mutable_copy(data)
+        _apply_aliases(data_copy, {"contactPerson": "contact_person", "companyId": "company_id"})
+        data_copy.pop("contactPerson", None)
+        data_copy.pop("companyId", None)
+        if self.instance:
+            data_copy["company_id"] = self.instance.company_id
+        else:
+            data_copy["company_id"] = data_copy.get("company_id") or data_copy.get("id") or _generate_id("cmp")
+        if "name" in data_copy or not self.instance:
+            name = " ".join(str(data_copy.get("name") or "").split())
+            if not name:
+                raise serializers.ValidationError({"name": "Company name is required."})
+            clash = Company.objects.filter(name__iexact=name)
+            if self.instance:
+                clash = clash.exclude(company_id=self.instance.company_id)
+            if clash.exists():
+                raise serializers.ValidationError({"name": f"A company named \"{name}\" already exists."})
+            data_copy["name"] = name
+        for key in ("code", "phone", "contact_person", "address", "email"):
+            if key in data_copy and data_copy[key] is None:
+                data_copy[key] = ""
+        if "status" in data_copy:
+            data_copy["status"] = parse_bool_status(data_copy["status"])
+        return super().to_internal_value(data_copy)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret["id"] = instance.company_id
+        ret["contactPerson"] = instance.contact_person
+        return ret
+
+
+class PublicCompanySerializer(serializers.ModelSerializer):
+    """What the public booking form sees: just the name to pick."""
+
+    class Meta:
+        model = Company
+        fields = ("company_id", "name")
+
+    def to_representation(self, instance):
+        return {"id": instance.company_id, "company_id": instance.company_id, "name": instance.name}
 
 
 # ============================================================
