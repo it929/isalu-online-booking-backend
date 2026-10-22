@@ -253,8 +253,8 @@ def hmo_notice_message(doctor_label, opens_at, bookable_now=None, clinic_start=N
     who = "HMO" if sponsor == "HMO" else "Company"
     yours = "your HMO" if sponsor == "HMO" else "your company"
     text = (
-        f"{who} patients can book a clinic from {hours} hours before it starts until {HMO_CLOSE_MINUTES} minutes "
-        f"before it starts, if space is still available. This gives us time to get approval from {yours}. "
+        f"{who} patients can book a clinic from {hours} hours before it starts, if space is still available. "
+        f"This gives us time to get approval from {yours}. "
         + (f"{who} booking for the {doctor_label} clinic on {timezone.localtime(clinic_start).strftime('%A, %d %B').replace(' 0', ' ')} "
            if clinic_start else f"{who} booking for this {doctor_label} clinic ")
         + f"opens on {_when(opens_at)}."
@@ -397,7 +397,12 @@ def confirm_payment(reference, transaction_data=None):
             logger.error("Paystack amount mismatch for %s: paid %s, expected %s", reference, paid_kobo, expected)
             return booking, "failed"
 
-        amount = (Decimal(paid_kobo) / 100).quantize(Decimal("0.01"))
+        # The booking records the clinic's consultation fee exactly. If the Paystack
+        # account passes its transaction charges to customers, the amount charged is
+        # higher; those charges aren't part of the consultation fee.
+        amount = Decimal(booking.fee_amount or 0).quantize(Decimal("0.01"))
+        if paid_kobo > expected:
+            logger.info("Paystack %s: charged %s kobo for a %s kobo fee (customer-paid charges)", reference, paid_kobo, expected)
         paid_at = timezone.now()
         common = {
             "amount_paid": amount,

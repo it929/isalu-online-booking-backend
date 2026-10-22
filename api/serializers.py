@@ -1,3 +1,4 @@
+import datetime
 import random
 import re
 import time
@@ -685,6 +686,24 @@ class BookingSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Referral letter is too large (maximum 5 MB).")
         return value
 
+    def _validate_phone(self, data):
+        """
+        Online (patient) bookings need a Nigerian mobile number, in any common
+        format. Checked when the booking is made or its phone number changes;
+        hospital staff entering bookings on the dashboard aren't restricted.
+        """
+        if self.instance is not None and "patient_phone" not in data:
+            return
+        request = self.context.get("request")
+        from .views import is_staff_request  # local import: views imports this module
+        if request is None or is_staff_request(request):
+            return
+        from .phone import nigerian_mobile_problem
+        problem = nigerian_mobile_problem(data.get("patient_phone"))
+        if problem:
+            raise self._error(problem, field="patient_phone", invalid_phone=True)
+        data["patient_phone"] = " ".join(str(data["patient_phone"]).split())
+
     def _validate_company(self, data):
         """
         Company patients pick their company from the Companies list (no enrollee
@@ -743,6 +762,7 @@ class BookingSerializer(serializers.ModelSerializer):
         data = super().validate(data)
         inst = self.instance
         self._validate_company(data)
+        self._validate_phone(data)
 
         if not self._scheduling_changed(data):
             # Editing the patient's name/phone must not create a duplicate either.
@@ -789,6 +809,20 @@ class BookingSerializer(serializers.ModelSerializer):
         now_local = timezone.localtime(timezone.now())
         if appt_date < now_local.date():
             raise self._error("Appointments cannot be booked for a past date.")
+
+        # Patients rescheduling a private booking online may move it to any open
+        # clinic day within the next 30 days (HMO/Company keep the HMO window).
+        if inst is not None and str(inst.date) != appt_date.isoformat():
+            req = self.context.get("request")
+            from .views import is_staff_request  # local import: views imports this module
+            from . import payments as _payments
+            pay_type = data.get("payment_type", inst.payment_type)
+            if req is not None and not is_staff_request(req) and not _payments.is_sponsored(pay_type):
+                if appt_date > now_local.date() + datetime.timedelta(days=RESCHEDULE_WINDOW_DAYS):
+                    raise self._error(
+                        f"You can reschedule to a clinic day within the next {RESCHEDULE_WINDOW_DAYS} days.",
+                        reschedule_window_days=RESCHEDULE_WINDOW_DAYS,
+                    )
 
         # ---- duty day ------------------------------------------------
         resolved = resolve_doctor_day(doc_obj, appt_date)
@@ -1016,6 +1050,8 @@ class HmoCompanySerializer(serializers.ModelSerializer):
 # ============================================================
 
 COMPANY_PAYMENT_TYPE = "Company"
+# Private patients rescheduling online can pick any open clinic day this far ahead.
+RESCHEDULE_WINDOW_DAYS = 30
 
 
 def is_company_type(payment_type):

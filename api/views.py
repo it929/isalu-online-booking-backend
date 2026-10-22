@@ -243,7 +243,7 @@ ALL_DESKS = [
     "helpdesk", "hmo", "cashdesk", "analytics", "monitor", "users", "all_patients",
     "checked_in_patients", "hmo_enrollees", "private_patients",
     "create_specialist_schedule", "clinic", "disabled_bookings", "hmo_declined",
-    "booking_payments", "companies",
+    "booking_payments", "companies", "cleared_patients",
 ]
 
 # HMO and Company patients are covered by their sponsor and approved at the HMO desk.

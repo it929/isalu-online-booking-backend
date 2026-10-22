@@ -170,7 +170,7 @@ def run_regression_tests(client, today_str):
     tue = next_weekday(1).isoformat()
     def book(date, name, c=anon):
         return c.post('/api/bookings/', {'doctorId': doc.doc_id, 'date': date, 'time': '09:00 AM',
-                                         'patientName': name, 'patientPhone': '0800000000',
+                                         'patientName': name, 'patientPhone': '08000000000',
                                          'paymentType': 'Private Self-Pay'}, format='json')
     assert book(tue, 'P1').status_code == 201
     r2 = book(tue, 'P2'); assert r2.status_code == 201
@@ -271,7 +271,7 @@ def run_regression_tests(client, today_str):
     r = client.patch(f'/api/roles/{role.role_id}/', {'description': 'changed'}, format='json')
     assert r.status_code == 200 and r.data['status'] == 'Disabled', r.data
     r = anon.post('/api/bookings/', {'doctorId': doc.doc_id, 'date': next_weekday(3).isoformat(), 'time': '10:00 AM',
-                                      'patientName': 'Sneaky', 'patientPhone': '1', 'paymentType': 'Private Self-Pay',
+                                      'patientName': 'Sneaky', 'patientPhone': '08010000001', 'paymentType': 'Private Self-Pay',
                                       'payment_status': 'Cleared', 'hmo_status': 'Approved', 'status': 'Checked In'}, format='json')
     assert r.status_code == 201 and r.data['paymentStatus'] == 'Pending' and r.data['status'] == 'Confirmed', r.data
     # R15: exact JSON stored for the two schedule types, even from messy input
@@ -528,7 +528,8 @@ def run_duplicate_and_channel_tests(client, today_str):
     assert r.status_code == 201, r.data
     first = r.data['refCode']
     # same person, other formats, SAME day in the same clinic -> blocked
-    r = book('doc-1', avail[0], 'ada   OBI', '+234 801 111 2222')
+    # (patients enter numbers starting with 0; the desk may type other formats)
+    r = book('doc-1', avail[0], 'ada   OBI', '+234 801 111 2222', c=client)
     assert r.status_code == 400 and 'Double booking' in str(r.data) and first in str(r.data), r.data
     # same person, same clinic, ANOTHER day -> allowed
     r = book('doc-1', avail[3], 'Ada Obi', '0801 111 2222')
@@ -539,7 +540,7 @@ def run_duplicate_and_channel_tests(client, today_str):
                                     department=Department.objects.get(dept_id='cardiology'), status=True)
     client.post('/api/schedules/', {'doctorId': cardio2.doc_id, 'room': 'C2', 'dutyDays': ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
         'dayConfigs': {d: {'shiftTimes': ['08:00 AM – 02:00 PM'], 'capacity': 9} for d in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']}}, format='json')
-    r = book(cardio2.doc_id, avail[0], 'Ada Obi', '2348011112222')
+    r = book(cardio2.doc_id, avail[0], 'Ada Obi', '2348011112222', c=client)
     assert r.status_code == 400 and 'Double booking' in str(r.data), r.data
     # pre-check endpoint used by the booking form (needs the chosen date)
     chk = anon.get('/api/bookings/duplicate-check/', {'doctor_id': cardio2.doc_id, 'patient_name': 'ada obi', 'patient_phone': '08011112222', 'date': avail[0]}).data
@@ -626,7 +627,7 @@ def run_duplicate_and_channel_tests(client, today_str):
     print('[R32 PASS] Public lookup hides referral documents, email and insurance codes (staff still see them).')
 
     # R30: referral uploads must be PDF/image and at most 5 MB
-    base = {'doctorId': 'doc-3', 'date': av[1]['date'], 'time': '08:00 AM – 02:00 PM', 'patientPhone': '0806000000',
+    base = {'doctorId': 'doc-3', 'date': av[1]['date'], 'time': '08:00 AM – 02:00 PM', 'patientPhone': '08060000000',
             'paymentType': 'Private Self-Pay'}
     bad_type = APIClient().post('/api/bookings/', {**base, 'patientName': 'Bad Type',
         'referralDocData': 'data:text/html;base64,PHNjcmlwdD4='}, format='json')
