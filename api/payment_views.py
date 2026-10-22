@@ -110,7 +110,7 @@ class StartPaymentView(APIView):
             return Response(flatten_error_detail(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
 
         doctor = Doctor.objects.select_related("department").filter(doc_id=serializer.validated_data["doctor_id"]).first()
-        fee = payments.clinic_fee(doctor)
+        fee = payments.clinic_fee(doctor, serializer.validated_data.get("visit_type"))
         if fee <= 0:
             return Response(
                 {"error": "This clinic has no online consultation fee. Book without paying online and pay at the cashdesk."},

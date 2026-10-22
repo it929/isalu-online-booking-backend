@@ -93,12 +93,43 @@ def is_sponsored(payment_type):
     return is_hmo(payment_type) or is_company(payment_type)
 
 
-def clinic_fee(doctor):
-    """The doctor's clinic consultation fee in Naira (Decimal), or 0."""
+FIRST_VISIT = "First Visit"
+FOLLOW_UP = "Follow-up"
+
+
+def normalize_visit_type(value):
+    """'follow up', 'Follow-Up', 'followup', 'return' -> 'Follow-up'; anything else -> 'First Visit'."""
+    v = str(value or "").strip().lower().replace("-", " ").replace("_", " ")
+    return FOLLOW_UP if v.replace(" ", "") in ("followup", "follow", "return", "returning", "review") else FIRST_VISIT
+
+
+def first_visit_fee(doctor):
+    """The clinic's first-visit consultation fee in Naira (Decimal), or 0."""
     if doctor is None or not doctor.department_id:
         return Decimal("0")
     fee = doctor.department.consultation_fee or Decimal("0")
     return Decimal(fee).quantize(Decimal("0.01"))
+
+
+def follow_up_fee(doctor):
+    """The clinic's follow-up fee; the first-visit fee when no follow-up fee is set."""
+    first = first_visit_fee(doctor)
+    if doctor is None or not doctor.department_id:
+        return first
+    fee = Decimal(doctor.department.follow_up_fee or 0).quantize(Decimal("0.01"))
+    return fee if fee > 0 else first
+
+
+def follow_up_balance(doctor):
+    """What a follow-up patient pays on arrival if it turns out to be a first visit."""
+    return max(first_visit_fee(doctor) - follow_up_fee(doctor), Decimal("0"))
+
+
+def clinic_fee(doctor, visit_type=None):
+    """Fee to pay online for this visit type (first visit by default), in Naira."""
+    if normalize_visit_type(visit_type) == FOLLOW_UP:
+        return follow_up_fee(doctor)
+    return first_visit_fee(doctor)
 
 
 def payment_mandatory():

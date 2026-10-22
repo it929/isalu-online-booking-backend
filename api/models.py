@@ -144,6 +144,14 @@ class Department(models.Model):
         default=0,
     )
 
+    # Follow-up visit fee in Naira. consultation_fee above is the first-visit
+    # fee. 0 = follow-ups cost the same as a first visit.
+    follow_up_fee = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+    )
+
     class Meta:
         ordering = ["name"]
 
@@ -620,6 +628,15 @@ class Booking(models.Model):
         null=True,
         blank=True,
     )
+
+    # "First Visit" or "Follow-up". A follow-up is charged the clinic's
+    # follow-up fee; if the hospital finds on arrival that it isn't a
+    # follow-up, the patient pays the balance up to the first-visit fee
+    # (first_visit_fee, recorded at booking time). The patient agrees to this
+    # on the booking form (follow_up_acknowledged).
+    visit_type = models.CharField(max_length=20, default="First Visit", blank=True)
+    follow_up_acknowledged = models.BooleanField(default=False)
+    first_visit_fee = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
     reminder_sent = models.BooleanField(
         default=False,
