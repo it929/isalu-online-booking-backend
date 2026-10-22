@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, CustomTimeSlot, Role, UserProfile
+from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, Company, CustomTimeSlot, Role, UserProfile
 
 @admin.register(Department)
 class DepartmentAdmin(admin.ModelAdmin):
@@ -31,6 +31,13 @@ class BookingAdmin(admin.ModelAdmin):
 @admin.register(HmoCompany)
 class HmoCompanyAdmin(admin.ModelAdmin):
     list_display = ('hmo_id', 'name', 'code', 'email', 'phone', 'contact_person', 'status')
+    search_fields = ('name', 'code', 'email', 'contact_person')
+    list_filter = ('status',)
+
+
+@admin.register(Company)
+class CompanyAdmin(admin.ModelAdmin):
+    list_display = ('company_id', 'name', 'code', 'email', 'phone', 'contact_person', 'status')
     search_fields = ('name', 'code', 'email', 'contact_person')
     list_filter = ('status',)
 

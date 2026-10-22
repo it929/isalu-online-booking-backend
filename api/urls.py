@@ -10,6 +10,7 @@ from .views import (
     SpecialistScheduleViewSet,
     BookingViewSet,
     HmoCompanyViewSet,
+    CompanyViewSet,
     SystemUserViewSet,
     CustomTimeSlotViewSet,
     RoleViewSet,
@@ -27,6 +28,7 @@ router.register(r'doctors', DoctorViewSet, basename='doctor')
 router.register(r'schedules', SpecialistScheduleViewSet, basename='schedule')
 router.register(r'bookings', BookingViewSet, basename='booking')
 router.register(r'hmo-companies', HmoCompanyViewSet, basename='hmocompany')
+router.register(r'companies', CompanyViewSet, basename='company')
 router.register(r'users', SystemUserViewSet, basename='systemuser')
 router.register(r'time-slots', CustomTimeSlotViewSet, basename='timeslot')
 router.register(r'roles', RoleViewSet, basename='role')

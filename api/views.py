@@ -36,6 +36,7 @@ from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from .models import (
     AppSetting,
     Booking,
+    Company,
     CustomTimeSlot,
     Department,
     Doctor,
@@ -62,10 +63,12 @@ from .serializers import (
     AppSettingSerializer,
     BookingListSerializer,
     BookingSerializer,
+    CompanySerializer,
     CustomTimeSlotSerializer,
     DepartmentSerializer,
     DoctorSerializer,
     HmoCompanySerializer,
+    PublicCompanySerializer,
     RoleSerializer,
     ScheduleExceptionSerializer,
     SpecialistScheduleSerializer,
@@ -240,8 +243,16 @@ ALL_DESKS = [
     "helpdesk", "hmo", "cashdesk", "analytics", "monitor", "users", "all_patients",
     "checked_in_patients", "hmo_enrollees", "private_patients",
     "create_specialist_schedule", "clinic", "disabled_bookings", "hmo_declined",
-    "booking_payments",
+    "booking_payments", "companies",
 ]
+
+# HMO and Company patients are covered by their sponsor and approved at the HMO desk.
+SPONSORED_TYPES_Q = Q(payment_type="HMO Insurance") | Q(payment_type__iexact="Company")
+
+
+def is_sponsored_booking(booking):
+    pt = str(getattr(booking, "payment_type", "") or "").strip().lower()
+    return pt == "hmo insurance" or "company" in pt
 
 
 def get_user_role(user):
@@ -1103,7 +1114,8 @@ def public_doctor_switch_error(booking, new_doctor_ref):
     if not same_clinic:
         return "You can only switch to another doctor in the same clinic. Please contact reception to change clinics."
 
-    patient_type = "HMO Insurance" if "hmo" in str(booking.payment_type or "").lower() else "Private Self-Pay"
+    # Company patients see the same doctors as HMO patients.
+    patient_type = "HMO Insurance" if is_sponsored_booking(booking) else "Private Self-Pay"
     accepted = new_doc.accepted_patient_types or ["Private Self-Pay", "HMO Insurance"]
     if patient_type not in accepted:
         return f"The selected doctor does not accept {patient_type} patients. Please choose another doctor."
@@ -1190,11 +1202,13 @@ class BookingViewSet(viewsets.ModelViewSet):
                 })
             # Payment / HMO / lifecycle fields are controlled by the desks,
             # never by the public booking form.
-            is_hmo = "hmo" in str(serializer.validated_data.get("payment_type", "")).lower()
+            pay_type = str(serializer.validated_data.get("payment_type", "")).lower()
+            is_company = "company" in pay_type
+            is_hmo = "hmo" in pay_type or is_company   # both go to the HMO desk for approval
             overrides = {
                 "status": "Confirmed",
                 "is_active": True,
-                "payment_status": "HMO Cover" if is_hmo else "Pending",
+                "payment_status": ("Company Cover" if is_company else "HMO Cover") if is_hmo else "Pending",
                 "hmo_status": "Pending Pre-Auth" if is_hmo else "N/A",
                 "hmo_auth_code": "",
                 "invoice_ref": "",
@@ -1473,7 +1487,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             checked_in=Count("ref_code", filter=Q(status="Checked In", date=today_iso)),
             pending_hmo=Count(
                 "ref_code",
-                filter=Q(payment_type="HMO Insurance") & ~Q(hmo_status__in=["Approved", "Declined"]),
+                filter=SPONSORED_TYPES_Q & ~Q(hmo_status__in=["Approved", "Declined"]),
             ),
             pending_cash=Count(
                 "ref_code",
@@ -1481,7 +1495,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             ),
             declined_hmo=Count(
                 "ref_code",
-                filter=Q(payment_type="HMO Insurance") & Q(hmo_status="Declined"),
+                filter=SPONSORED_TYPES_Q & Q(hmo_status="Declined"),
             ),
         )
         payload = {
@@ -1742,7 +1756,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             return staff_required_response("check patients in")
 
         booking = self.get_object()
-        if booking.payment_type == "HMO Insurance" and booking.hmo_status != "Approved":
+        if is_sponsored_booking(booking) and booking.hmo_status != "Approved":
             return Response(
                 {
                     "error": (
@@ -1789,7 +1803,8 @@ class BookingViewSet(viewsets.ModelViewSet):
         policy = (
             str(request.data.get("policyCode") or "").strip()
             or booking.hmo_policy_code
-            or f"POL-{random.randint(100000, 999999)}"
+            # Company patients have no enrollee ID.
+            or ("" if "company" in str(booking.payment_type or "").lower() else f"POL-{random.randint(100000, 999999)}")
         )
         auth = str(request.data.get("authCode") or "").strip() or booking.hmo_auth_code
         if not auth:
@@ -1828,7 +1843,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             return staff_required_response("decline HMO authorizations")
 
         booking = self.get_object()
-        if str(booking.payment_type or "").strip().lower() != "hmo insurance":
+        if not is_sponsored_booking(booking):
             return Response(
                 {"error": f"Ticket {booking.ref_code} is not an HMO booking."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -1989,6 +2004,75 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
             *args,
             **kwargs,
         )
+
+
+# ============================================================
+# COMPANIES (Company patients: like HMO, no enrollee ID)
+# ============================================================
+
+class CompanyViewSet(viewsets.ModelViewSet):
+    """
+    The public booking form lists active companies (name only). Staff with the
+    Companies module (and administrators) see every detail. Only
+    administrators add, edit, delete or upload companies.
+    """
+    queryset = Company.objects.all().order_by("name")
+    serializer_class = CompanySerializer
+    permission_classes = [AdminOrReadOnly]
+    lookup_field = "company_id"
+    pagination_class = None
+
+    def _staff_view(self):
+        return is_staff_request(self.request) and user_has_desk(self.request.user, "companies")
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if not self._staff_view():
+            qs = qs.filter(status=True)
+        q = str(self.request.query_params.get("search") or "").strip()
+        if q:
+            qs = qs.filter(name__icontains=q)
+        return qs
+
+    def get_serializer_class(self):
+        if self.request.method in SAFE_METHODS and not self._staff_view():
+            return PublicCompanySerializer
+        return CompanySerializer
+
+    def list(self, request, *args, **kwargs):
+        data = self.get_serializer(self.get_queryset(), many=True).data
+        if self._staff_view():
+            counts = dict(
+                Booking.objects.filter(payment_type__iexact="Company", is_active=True)
+                .exclude(status__iexact="Disabled")
+                .values_list("hmo_name")
+                .annotate(n=Count("ref_code"))
+            )
+            lowered = {str(k or "").lower(): v for k, v in counts.items()}
+            for row in data:
+                row["bookingCount"] = lowered.get(str(row.get("name") or "").lower(), 0)
+        return Response(data)
+
+    @action(detail=False, methods=["post"], url_path="bulk-upload")
+    def bulk_upload(self, request):
+        """
+        Upload a CSV or Excel (.xlsx) file of companies. Columns (header row,
+        any order): name (required), code, email, phone, contact_person, address,
+        status. Existing companies (same name) are updated; new ones are added.
+        """
+        from .company_upload import UploadError, import_companies, read_rows
+
+        upload = request.FILES.get("file")
+        if upload is None:
+            return Response({"error": "Choose a CSV or Excel (.xlsx) file to upload."}, status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > 5 * 1024 * 1024:
+            return Response({"error": "The file is too large (maximum 5 MB)."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            rows = read_rows(upload.name, upload.read())
+            result = import_companies(rows)
+        except UploadError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 # ============================================================
@@ -2191,7 +2275,7 @@ class AiReportView(APIView):
         completed = active.filter(status="Completed").count()
         pending_hmo = (
             active
-            .filter(payment_type="HMO Insurance")
+            .filter(SPONSORED_TYPES_Q)
             .exclude(hmo_status__in=["Approved", "Declined"])
             .count()
         )

@@ -110,6 +110,8 @@ def send_email_reminder(booking, is_3hour_notice: bool = False) -> tuple[bool, s
     ref_code = booking.ref_code
     payment_type = booking.payment_type or "Private Self-Pay"
     hmo_info = f" (HMO: {booking.hmo_name})" if booking.payment_type == "HMO Insurance" and booking.hmo_name else ""
+    if "company" in str(booking.payment_type or "").lower() and booking.hmo_name:
+        hmo_info = f" (Company: {booking.hmo_name})"
 
     if is_3hour_notice:
         subject = f"Urgent Reminder: Session Starts in 3 Hours at {HOSPITAL_NAME} [{ref_code}]"

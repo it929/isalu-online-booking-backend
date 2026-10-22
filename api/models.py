@@ -19,6 +19,30 @@ class HmoCompany(models.Model):
         return f"{self.name} ({self.code})"
 
 
+class Company(models.Model):
+    """
+    A company whose staff are booked as "Company" patients. Works like an HMO
+    (the company covers the visit and the HMO desk approves it) but patients
+    don't need an enrollee ID. Managed in the dashboard's Companies module.
+    """
+    company_id = models.CharField(max_length=100, primary_key=True)
+    name = models.CharField(max_length=200, unique=True)
+    code = models.CharField(max_length=50, blank=True, default='')
+    email = models.EmailField(blank=True, default='')
+    phone = models.CharField(max_length=50, blank=True, default='')
+    contact_person = models.CharField(max_length=200, blank=True, default='')
+    address = models.CharField(max_length=300, blank=True, default='')
+    status = models.BooleanField(default=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['name']
+        verbose_name_plural = 'companies'
+
+    def __str__(self):
+        return self.name
+
+
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import User
 
