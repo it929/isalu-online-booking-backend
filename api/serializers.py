@@ -1,3 +1,4 @@
+import datetime
 import random
 import re
 import time
@@ -144,9 +145,14 @@ class DepartmentSerializer(serializers.ModelSerializer):
             "doctorCount": "doctor_count",
             "consultationFee": "consultation_fee",
             "fee": "consultation_fee",
+            "firstVisitFee": "consultation_fee",
+            "first_visit_fee": "consultation_fee",
+            "followUpFee": "follow_up_fee",
         })
         if "consultation_fee" in data_copy and data_copy.get("consultation_fee") in ("", None):
             data_copy["consultation_fee"] = 0
+        if "follow_up_fee" in data_copy and data_copy.get("follow_up_fee") in ("", None):
+            data_copy["follow_up_fee"] = 0
 
         if self.instance:
             # The primary key can never be changed through the API.
@@ -177,6 +183,23 @@ class DepartmentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("The consultation fee looks too large. Enter the amount in Naira.")
         return value
 
+    def validate_follow_up_fee(self, value):
+        if value is None:
+            return 0
+        if value < 0:
+            raise serializers.ValidationError("The follow-up fee can't be negative.")
+        if value > 10_000_000:
+            raise serializers.ValidationError("The follow-up fee looks too large. Enter the amount in Naira.")
+        return value
+
+    def validate(self, data):
+        data = super().validate(data)
+        first = data.get("consultation_fee", self.instance.consultation_fee if self.instance else 0) or 0
+        follow = data.get("follow_up_fee", self.instance.follow_up_fee if self.instance else 0) or 0
+        if follow and first and follow > first:
+            raise serializers.ValidationError({"follow_up_fee": "The follow-up fee can't be more than the first-visit fee."})
+        return data
+
     def validate_dept_id(self, value):
         value = str(value).strip()
         if not value:
@@ -200,6 +223,9 @@ class DepartmentSerializer(serializers.ModelSerializer):
         fee = float(instance.consultation_fee or 0)
         ret["consultation_fee"] = fee
         ret["consultationFee"] = fee
+        follow = float(getattr(instance, "follow_up_fee", 0) or 0)
+        ret["follow_up_fee"] = follow
+        ret["followUpFee"] = follow
 
         doc_count = instance.doctors.count()
         ret["doctor_count"] = doc_count if doc_count > 0 else (instance.doctor_count or 0)
@@ -299,6 +325,9 @@ class DoctorSerializer(serializers.ModelSerializer):
         fee = float(instance.department.consultation_fee or 0) if instance.department else 0.0
         ret["consultationFee"] = fee
         ret["consultation_fee"] = fee
+        follow = float(instance.department.follow_up_fee or 0) if instance.department else 0.0
+        ret["followUpFee"] = follow
+        ret["follow_up_fee"] = follow
         if instance.department:
             ret["department"] = {
                 "dept_id": instance.department.dept_id,
@@ -522,6 +551,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "ref_code", "created_at", "hmo_decline_reason", "hmo_declined_at", "hmo_declined_by",
             # Online payment details are only ever set by the server.
             "fee_amount", "payment_reference", "payment_expires_at", "amount_paid", "paid_at",
+            "first_visit_fee",
         ]
         # Derived from the selected doctor in validate().
         extra_kwargs = {
@@ -571,6 +601,8 @@ class BookingSerializer(serializers.ModelSerializer):
             "invoiceRef": "invoice_ref",
             "isActive": "is_active",
             "deleteReason": "delete_reason",
+            "visitType": "visit_type",
+            "followUpAcknowledged": "follow_up_acknowledged",
         })
         data_copy.pop("ref_code", None)
         data_copy.pop("refCode", None)
@@ -601,6 +633,16 @@ class BookingSerializer(serializers.ModelSerializer):
         ret["patientPhone"] = instance.patient_phone
         ret["patientEmail"] = instance.patient_email
         ret["paymentType"] = instance.payment_type
+        ret["visitType"] = instance.visit_type or "First Visit"
+        ret["followUpAcknowledged"] = bool(instance.follow_up_acknowledged)
+        ret["firstVisitFee"] = float(instance.first_visit_fee) if instance.first_visit_fee is not None else None
+        # Balance a follow-up patient pays on arrival if it turns out to be a first visit.
+        balance = None
+        if (instance.visit_type or "") == "Follow-up" and instance.first_visit_fee is not None:
+            paid = instance.fee_amount if instance.fee_amount is not None else None
+            if paid is not None:
+                balance = max(float(instance.first_visit_fee) - float(paid), 0.0)
+        ret["followUpBalance"] = balance
         ret["paymentStatus"] = instance.payment_status
         ret["paymentMethod"] = instance.payment_method
         ret["hmoName"] = instance.hmo_name
@@ -685,6 +727,59 @@ class BookingSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Referral letter is too large (maximum 5 MB).")
         return value
 
+    def _validate_visit_type(self, data):
+        """
+        First Visit or Follow-up. A private patient booking a follow-up online
+        must agree that, if the hospital finds on arrival that it isn't a
+        follow-up, they pay the balance up to the first-visit fee.
+        """
+        from . import payments
+        inst = self.instance
+        if inst is not None and "visit_type" not in data and "follow_up_acknowledged" not in data:
+            return
+        visit = payments.normalize_visit_type(data.get("visit_type", inst.visit_type if inst else ""))
+        data["visit_type"] = visit
+        if visit != payments.FOLLOW_UP:
+            data["follow_up_acknowledged"] = False
+            data["first_visit_fee"] = None
+            return
+        doc = _resolve_doctor(data.get("doctor_id") or (inst.doctor_id if inst else None))
+        data["first_visit_fee"] = payments.first_visit_fee(doc) if doc else None
+        pay_type = data.get("payment_type", inst.payment_type if inst else "Private Self-Pay")
+        request = self.context.get("request")
+        from .views import is_staff_request  # local import: views imports this module
+        staff = request is not None and is_staff_request(request)
+        agreed = data.get("follow_up_acknowledged", inst.follow_up_acknowledged if inst else False)
+        agreed = agreed is True or str(agreed).strip().lower() in ("true", "1", "yes", "on")
+        data["follow_up_acknowledged"] = agreed
+        if (request is not None and not staff and not payments.is_sponsored(pay_type)
+                and doc is not None and payments.follow_up_balance(doc) > 0 and not agreed):
+            balance = payments.follow_up_balance(doc)
+            raise self._error(
+                "Please confirm the follow-up note: if the hospital finds on arrival that this isn't a "
+                f"follow-up visit, you'll pay the balance of NGN {balance:,.0f} to complete the first-visit fee.",
+                follow_up_ack_required=True,
+                follow_up_balance=float(balance),
+            )
+
+    def _validate_phone(self, data):
+        """
+        Online (patient) bookings need a Nigerian mobile number, in any common
+        format. Checked when the booking is made or its phone number changes;
+        hospital staff entering bookings on the dashboard aren't restricted.
+        """
+        if self.instance is not None and "patient_phone" not in data:
+            return
+        request = self.context.get("request")
+        from .views import is_staff_request  # local import: views imports this module
+        if request is None or is_staff_request(request):
+            return
+        from .phone import nigerian_mobile_problem
+        problem = nigerian_mobile_problem(data.get("patient_phone"))
+        if problem:
+            raise self._error(problem, field="patient_phone", invalid_phone=True)
+        data["patient_phone"] = " ".join(str(data["patient_phone"]).split())
+
     def _validate_company(self, data):
         """
         Company patients pick their company from the Companies list (no enrollee
@@ -743,6 +838,8 @@ class BookingSerializer(serializers.ModelSerializer):
         data = super().validate(data)
         inst = self.instance
         self._validate_company(data)
+        self._validate_phone(data)
+        self._validate_visit_type(data)
 
         if not self._scheduling_changed(data):
             # Editing the patient's name/phone must not create a duplicate either.
@@ -789,6 +886,20 @@ class BookingSerializer(serializers.ModelSerializer):
         now_local = timezone.localtime(timezone.now())
         if appt_date < now_local.date():
             raise self._error("Appointments cannot be booked for a past date.")
+
+        # Patients rescheduling a private booking online may move it to any open
+        # clinic day within the next 30 days (HMO/Company keep the HMO window).
+        if inst is not None and str(inst.date) != appt_date.isoformat():
+            req = self.context.get("request")
+            from .views import is_staff_request  # local import: views imports this module
+            from . import payments as _payments
+            pay_type = data.get("payment_type", inst.payment_type)
+            if req is not None and not is_staff_request(req) and not _payments.is_sponsored(pay_type):
+                if appt_date > now_local.date() + datetime.timedelta(days=RESCHEDULE_WINDOW_DAYS):
+                    raise self._error(
+                        f"You can reschedule to a clinic day within the next {RESCHEDULE_WINDOW_DAYS} days.",
+                        reschedule_window_days=RESCHEDULE_WINDOW_DAYS,
+                    )
 
         # ---- duty day ------------------------------------------------
         resolved = resolve_doctor_day(doc_obj, appt_date)
@@ -1016,6 +1127,8 @@ class HmoCompanySerializer(serializers.ModelSerializer):
 # ============================================================
 
 COMPANY_PAYMENT_TYPE = "Company"
+# Private patients rescheduling online can pick any open clinic day this far ahead.
+RESCHEDULE_WINDOW_DAYS = 30
 
 
 def is_company_type(payment_type):

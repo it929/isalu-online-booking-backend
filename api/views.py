@@ -243,7 +243,7 @@ ALL_DESKS = [
     "helpdesk", "hmo", "cashdesk", "analytics", "monitor", "users", "all_patients",
     "checked_in_patients", "hmo_enrollees", "private_patients",
     "create_specialist_schedule", "clinic", "disabled_bookings", "hmo_declined",
-    "booking_payments", "companies",
+    "booking_payments", "companies", "cleared_patients",
 ]
 
 # HMO and Company patients are covered by their sponsor and approved at the HMO desk.
@@ -881,6 +881,9 @@ class DoctorViewSet(viewsets.ModelViewSet):
             "hmo_close_minutes": payments.HMO_CLOSE_MINUTES,
             "earliest_hmo_date": next((d["date"] for d in availability_details if d["hmo_available"]), None),
             "consultation_fee": float(payments.clinic_fee(doctor)),
+            # First visit = consultation_fee; follow-up = follow_up_fee (same as first visit when not set).
+            "first_visit_fee": float(payments.first_visit_fee(doctor)),
+            "follow_up_fee": float(payments.follow_up_fee(doctor)),
             "online_payment_required": payments.requires_online_payment(doctor, "Private Self-Pay"),
             # "" when private patients can book (and pay) online; otherwise the reason.
             "private_booking_problem": payments.private_booking_problem(doctor)
