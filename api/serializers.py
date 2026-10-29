@@ -698,7 +698,12 @@ class BookingSerializer(serializers.ModelSerializer):
             for key in ("patient_name", "patient_phone")
         )
 
-    def _reject_duplicate(self, doctor, name, phone, date):
+    def _reject_duplicate(self, doctor, name, phone, date, payment_type=None):
+        # One appointment per clinic per day applies to HMO and Company patients only;
+        # Private Self-Pay patients may book the same clinic more than once a day.
+        from . import payments as _payments
+        if not _payments.is_sponsored(payment_type or "Private Self-Pay"):
+            return
         from .scheduling import AWAITING_PAYMENT, PAYMENT_EXPIRED
         exclude = self.instance.ref_code if self.instance else None
         existing = find_duplicate_booking(doctor, name, phone, exclude_ref=exclude, date=date)
@@ -926,6 +931,7 @@ class BookingSerializer(serializers.ModelSerializer):
                     data.get("patient_name", inst.patient_name),
                     data.get("patient_phone", inst.patient_phone),
                     inst.date,
+                    data.get("payment_type", inst.payment_type),
                 )
             return data
 
@@ -1037,6 +1043,7 @@ class BookingSerializer(serializers.ModelSerializer):
             data.get("patient_name", inst.patient_name if inst else ""),
             data.get("patient_phone", inst.patient_phone if inst else ""),
             data["date"],
+            data.get("payment_type", inst.payment_type if inst else "Private Self-Pay"),
         )
 
         # ---- capacity ------------------------------------------------
@@ -1112,6 +1119,7 @@ class BookingSerializer(serializers.ModelSerializer):
                 validated_data.get("patient_name"),
                 validated_data.get("patient_phone"),
                 validated_data.get("date"),
+                validated_data.get("payment_type"),
             )
             validated_data["ref_code"] = self._generate_ref_code()
             return Booking.objects.create(**validated_data)
@@ -1145,6 +1153,11 @@ class BookingListSerializer(BookingSerializer):
         data = super().to_representation(instance)
         data.pop("referralDocData", None)
         data.pop("referralDocText", None)
+        # Payment extras loaded in one batch by the list/sync views (see views.payment_extras).
+        extras = (self.context.get("payment_extras") or {}).get(instance.ref_code) or {}
+        data["rescheduleFeesPaid"] = extras.get("reschedule_total", 0.0)
+        data["rescheduleCount"] = extras.get("reschedule_count", 0)
+        data["paymentChannel"] = extras.get("channel", "")
         return data
 
 

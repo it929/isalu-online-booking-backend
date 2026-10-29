@@ -885,6 +885,8 @@ class PaymentEvent(models.Model):
         ("cleared_without_payment", "Cleared but Paystack shows no payment"),
         ("reschedule_paid", "Reschedule fee paid"),
         ("reschedule_not_applied", "Reschedule paid, new date no longer free"),
+        ("payment_linked", "Payment linked to a booking by staff"),
+        ("unmatched_dismissed", "Marked as not a booking payment"),
     ]
 
     kind = models.CharField(max_length=40, choices=KINDS, db_index=True)

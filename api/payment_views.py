@@ -556,3 +556,52 @@ class RescheduleVerifyView(APIView):
             "message": rp.note if outcome in ("not_applied", "underpaid") else "",
             "booking": public_booking_payload(booking) if booking else None,
         })
+
+
+class ReconcileLinkView(APIView):
+    """
+    POST /api/payments/reconcile/link/ {"reference", "ref_code", "note"}
+    Tie a Paystack payment that matched no booking to the patient's booking and confirm it.
+    """
+
+    throttle_classes = [MoneyActionThrottle]
+
+    def post(self, request):
+        from . import reconciliation
+
+        denied = _reconcile_access(request, "confirm")
+        if denied:
+            return denied
+        try:
+            result, outcome, booking = reconciliation.link_payment(
+                request.data.get("reference"), request.data.get("ref_code"), request.data.get("note"),
+                request.user, client_ip(request))
+        except reconciliation.ReconcileError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if booking is not None and outcome == "paid":
+            broadcast_booking_update(booking, event_type="NEW_BOOKING",
+                                     message=f"Online payment linked and confirmed for {booking.patient_name} ({booking.ref_code}).")
+        return Response(result)
+
+
+class ReconcileResolveView(APIView):
+    """
+    POST /api/payments/reconcile/resolve/ {"reference", "action": "dismiss"|"refund", "note"}
+    A payment with no booking: mark it as not a booking payment, or open a refund.
+    """
+
+    throttle_classes = [MoneyActionThrottle]
+
+    def post(self, request):
+        from . import reconciliation
+
+        action = str(request.data.get("action") or "")
+        denied = _reconcile_access(request, "record_refund" if action == "refund" else "confirm")
+        if denied:
+            return denied
+        try:
+            result = reconciliation.resolve_unmatched(request.data.get("reference"), action, request.data.get("note"),
+                                                      request.user, client_ip(request))
+        except reconciliation.ReconcileError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)

@@ -515,14 +515,20 @@ def run_permission_tests(client, today_str):
 
 
 def run_duplicate_and_channel_tests(client, today_str):
-    """R25-R27: double-booking guard; unconfigured channels are reported, never faked."""
+    """R25-R27: double-booking guard (HMO/Company patients); unconfigured channels are reported, never faked."""
     from django.conf import settings
     from api.models import ScheduleException
     anon = APIClient()
     avail = [d['date'] for d in client.get('/api/doctors/doc-1/available-dates/?days=40').data['availability']
              if d['available'] and d['date'] > today_str]
-    def book(doc, date, name, phone, c=anon):
+    # The one-appointment-per-clinic-per-day rule applies to HMO and Company patients
+    # (booked here by staff, so the HMO booking window doesn't apply).
+    def book(doc, date, name, phone, c=client):
         return c.post('/api/bookings/', {'doctorId': doc, 'date': date, 'time': '08:00 AM – 02:00 PM',
+            'patientName': name, 'patientPhone': phone, 'paymentType': 'HMO Insurance', 'hmoName': 'AXA Mansard',
+            'hmoPolicyCode': 'AXA-E2E-1'}, format='json')
+    def book_private(doc, date, name, phone):
+        return anon.post('/api/bookings/', {'doctorId': doc, 'date': date, 'time': '08:00 AM – 02:00 PM',
             'patientName': name, 'patientPhone': phone, 'paymentType': 'Private Self-Pay'}, format='json')
 
     r = book('doc-1', avail[0], 'Mrs. Ada Obi', '0801 111 2222')
@@ -554,10 +560,10 @@ def run_duplicate_and_channel_tests(client, today_str):
     assert book('doc-1', avail[1], 'Chidi Obi', '08011112222').status_code == 201
     assert book('doc-1', avail[1], 'Ada Obi', '08099990000').status_code == 201
     # rescheduling onto the day of the patient's other booking -> blocked
-    r = anon.patch(f'/api/bookings/{first}/', {'date': avail[3], 'time': '08:00 AM – 02:00 PM', 'status': 'Confirmed'}, format='json')
+    r = client.patch(f'/api/bookings/{first}/', {'date': avail[3], 'time': '08:00 AM – 02:00 PM', 'status': 'Confirmed'}, format='json')
     assert r.status_code == 400 and 'Double booking' in str(r.data) and other_day in str(r.data), r.data
     # rescheduling the existing booking is not a duplicate of itself
-    r = anon.patch(f'/api/bookings/{first}/', {'date': avail[2], 'time': '08:00 AM – 02:00 PM', 'status': 'Confirmed'}, format='json')
+    r = client.patch(f'/api/bookings/{first}/', {'date': avail[2], 'time': '08:00 AM – 02:00 PM', 'status': 'Confirmed'}, format='json')
     assert r.status_code == 200, r.data
     # staff editing another booking's name into a duplicate is blocked
     other = book('doc-1', avail[2], 'Bola Ade', '08022223333').data['refCode']
@@ -566,7 +572,13 @@ def run_duplicate_and_channel_tests(client, today_str):
     # once cancelled, the patient may book that clinic again
     assert client.patch(f'/api/bookings/{first}/', {'status': 'Cancelled'}, format='json').status_code == 200
     assert book('doc-1', avail[2], 'Ada Obi', '0801 111 2222').status_code == 201
-    print('[R25 PASS] One appointment per patient (name + phone) per clinic per day; other days allowed; formats, titles and other doctors covered.')
+    # Private Self-Pay patients are exempt: the same patient may book the same clinic twice on a day
+    r1 = book_private('doc-1', avail[5], 'Pat Private', '08012340000')
+    r2 = book_private('doc-1', avail[5], 'Pat Private', '08012340000')
+    assert r1.status_code == 201 and r2.status_code == 201, (r1.data, r2.data)
+    assert anon.get('/api/bookings/duplicate-check/', {'doctor_id': 'doc-1', 'patient_name': 'Pat Private', 'patient_phone': '08012340000',
+                                                       'date': avail[5], 'payment_type': 'Private Self-Pay'}).data['duplicate'] is False
+    print('[R25 PASS] One appointment per HMO/Company patient (name + phone) per clinic per day; Private Self-Pay exempt; other days allowed; formats, titles and other doctors covered.')
 
     # R26: SMS text is plain GSM (no en dash) and short
     from api.notification_service import _schedule_change_texts, to_gsm_text
@@ -599,8 +611,9 @@ def run_duplicate_and_channel_tests(client, today_str):
     # R28: restoring an archived booking cannot recreate a double booking
     avail = [d for d in client.get('/api/doctors/doc-2/available-dates/?days=40').data['availability'] if d['available'] and d['date'] > today_str]
     def bk(date):
-        return APIClient().post('/api/bookings/', {'doctorId': 'doc-2', 'date': date, 'time': '09:00 AM – 04:00 PM',
-            'patientName': 'Restore Twice', 'patientPhone': '0807 000 1111', 'paymentType': 'Private Self-Pay'}, format='json')
+        return client.post('/api/bookings/', {'doctorId': 'doc-2', 'date': date, 'time': '09:00 AM – 04:00 PM',
+            'patientName': 'Restore Twice', 'patientPhone': '0807 000 1111', 'paymentType': 'HMO Insurance',
+            'hmoName': 'AXA Mansard', 'hmoPolicyCode': 'AXA-E2E-2'}, format='json')
     first = bk(avail[0]['date']).data['refCode']
     assert client.delete(f'/api/bookings/{first}/').status_code == 200          # archived -> slot freed
     second = bk(avail[0]['date'])

@@ -30,7 +30,7 @@ from django.utils.dateparse import parse_datetime
 
 from . import payment_ops as ops
 from . import payments
-from .models import Booking, PaymentAttempt, PaymentCheck, PaymentEvent, Refund
+from .models import Booking, Doctor, PaymentAttempt, PaymentCheck, PaymentEvent, Refund
 from .scheduling import AWAITING_PAYMENT, PAYMENT_EXPIRED
 
 logger = logging.getLogger(__name__)
@@ -215,6 +215,7 @@ VERDICTS = {
     "reschedule_pending": ("warning", "Reschedule fee paid, but the booking hasn't moved yet"),
     "reschedule_not_applied": ("warning", "Reschedule fee paid, but the new date wasn't free: refund due"),
     "reschedule_unpaid": ("neutral", "Reschedule fee not paid"),
+    "unmatched_dismissed": ("neutral", "Marked as not a booking payment"),
 }
 
 
@@ -255,10 +256,20 @@ def _verdict(tx, booking, reference):
 
     if booking is None:
         if status == "success":
-            return "no_booking", (
-                f"Paystack received ₦{_naira(amount_kobo):,.2f} with this reference, but no booking on this system "
-                "matches it. It may be a payment for something other than a clinic booking."
-            ), False
+            dismissed = PaymentEvent.objects.filter(kind="unmatched_dismissed", reference=reference).first()
+            if dismissed:
+                return "unmatched_dismissed", (f"{dismissed.actor or 'Staff'} marked this payment as not a booking payment "
+                                               f"on {timezone.localtime(dismissed.created_at):%d %b %Y}: {dismissed.note}"), False
+            claimed = payments.tx_ref_code(tx)
+            if claimed:
+                why = (f"Paystack received ₦{_naira(amount_kobo):,.2f} for booking {claimed}, but that booking isn't on this "
+                       "system. This usually means the payment was made on another copy of the booking site that uses the "
+                       "same Paystack keys (for example a test or local copy), or the booking was created elsewhere. ")
+            else:
+                why = (f"Paystack received ₦{_naira(amount_kobo):,.2f} with this reference, but it carries no booking "
+                       "reference and no booking on this system matches it. ")
+            return "no_booking", why + ("Link it to the patient's booking below, open a refund, or mark it as not a booking "
+                                        "payment."), False
         return "no_booking", "Paystack has this reference, but it wasn't paid and no booking matches it.", False
 
     paid_ref = booking.invoice_ref if booking.payment_method == payments.ONLINE_METHOD else ""
@@ -322,6 +333,82 @@ def _verdict(tx, booking, reference):
     return "not_paid", label + "." + tail, False
 
 
+def _meta(tx):
+    meta = (tx or {}).get("metadata")
+    if isinstance(meta, str):
+        try:
+            import json as _json
+            meta = _json.loads(meta)
+        except ValueError:
+            meta = {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _synthetic_phone(email):
+    """The booking site emails Paystack 'patient-08031234567@isaluhospitals.com' when the patient gave none."""
+    m = re.match(r"^patient-(\d{7,15})@isaluhospitals\.com$", str(email or "").strip().lower())
+    return m.group(1) if m else ""
+
+
+def _claimed(tx):
+    """What the Paystack transaction says it was for (from the metadata the booking site sent)."""
+    meta = _meta(tx)
+    customer = (tx or {}).get("customer") or {}
+    email = str(customer.get("email") or "")
+    return {
+        "booking_ref": payments.tx_ref_code(tx),
+        "patient_name": str(meta.get("patient_name") or ""),
+        "clinic": str(meta.get("clinic") or ""),
+        "appointment_date": str(meta.get("appointment_date") or meta.get("new_date") or ""),
+        "purpose": str(meta.get("purpose") or "booking"),
+        "email": "" if _synthetic_phone(email) else email,
+        "phone": _synthetic_phone(email) or str(customer.get("phone") or ""),
+    }
+
+
+def _suggestions(tx, limit=6):
+    """Bookings that may be the one this unmatched payment was for (same name, phone or email)."""
+    from .duplicates import normalize_name, normalize_phone
+
+    c = _claimed(tx)
+    name_key = normalize_name(c["patient_name"])
+    phone_key = normalize_phone(c["phone"])
+    email = c["email"].lower()
+    q = Q(pk__in=[])
+    if c["booking_ref"]:
+        q |= Q(ref_code__iexact=c["booking_ref"])
+    if email:
+        q |= Q(patient_email__iexact=email) | Q(booker_email__iexact=email)
+    if len(phone_key) >= 7:
+        q |= Q(patient_phone__contains=phone_key[-4:]) | Q(booker_phone__contains=phone_key[-4:])
+    if name_key:
+        q |= Q(patient_name__icontains=name_key.split()[0])
+    since = timezone.now() - datetime.timedelta(days=60)
+    rows = []
+    for b in (Booking.objects.filter(q, created_at__gte=since).exclude(payment_type="HMO Insurance")
+              .exclude(payment_type__iexact="Company").order_by("-created_at")[:200]):
+        score = 0
+        if c["booking_ref"] and b.ref_code.lower() == c["booking_ref"].lower():
+            score += 10
+        if email and email in ((b.patient_email or "").lower(), (getattr(b, "booker_email", "") or "").lower()):
+            score += 4
+        if len(phone_key) >= 7 and phone_key in (normalize_phone(b.patient_phone), normalize_phone(getattr(b, "booker_phone", ""))):
+            score += 4
+        if name_key and normalize_name(b.patient_name) == name_key:
+            score += 3
+        if c["clinic"] and (b.doctor_specialty or "").lower() == c["clinic"].lower():
+            score += 1
+        if c["appointment_date"] and str(b.date) == c["appointment_date"]:
+            score += 1
+        if score >= 3:
+            row = _booking_payload(b)
+            row["score"] = score
+            row["settled"] = b.payment_status in (payments.PAYMENT_STATUS_PAID, payments.PAYMENT_STATUS_REFUNDED)
+            rows.append(row)
+    rows.sort(key=lambda r: (-r["score"], r["settled"]))
+    return rows[:limit]
+
+
 def _result(reference, tx, booking, how, user=None):
     key, explanation, can_confirm = _verdict(tx, booking, reference)
     tone, headline = VERDICTS[key]
@@ -347,6 +434,8 @@ def _result(reference, tx, booking, how, user=None):
         "attempts": [_attempt_payload(a) for a in attempts[:20]],
         "refunds": [ops.refund_payload(r) for r in refunds[:20]],
         "events": [event_payload(e) for e in events.order_by("-created_at")[:30]],
+        "claimed": _claimed(tx) if (tx and booking is None) else None,
+        "suggestions": _suggestions(tx) if (tx and booking is None and key == "no_booking") else [],
         "permissions": perms,
         "checked_at": timezone.localtime().isoformat(),
     }
@@ -487,9 +576,12 @@ def overview(user=None):
                for b in Booking.objects.filter(payment_status__in=[payments.PAYMENT_STATUS_REVERSED, payments.PAYMENT_STATUS_DISPUTED])
                .order_by("-updated_at")[:100]]
 
+    resolved = set(PaymentEvent.objects.filter(kind__in=["payment_linked", "unmatched_dismissed"])
+                   .values_list("reference", flat=True)) | set(Refund.objects.values_list("reference", flat=True))
     alerts = [event_payload(e) for e in PaymentEvent.objects.filter(
         kind__in=["unmatched_payment", "cleared_without_payment", "underpaid", "duplicate_payment"],
-        created_at__gte=now - datetime.timedelta(days=UNRESOLVED_DAYS))[:50]]
+        created_at__gte=now - datetime.timedelta(days=UNRESOLVED_DAYS))[:200]
+        if not (e.kind == "unmatched_payment" and (e.reference in resolved or payments.booking_ref_for(e.reference)))][:50]
 
     open_refunds = Refund.objects.filter(status__in=Refund.OPEN_STATUSES)
     refunds_owed = open_refunds.aggregate(t=Sum("amount"))["t"] or 0
@@ -522,3 +614,89 @@ def ledger(date_from, date_to):
     rows = PaymentEvent.objects.filter(created_at__gte=start, created_at__lt=end)
     return {"from": date_from.isoformat(), "to": date_to.isoformat(),
             "events": [event_payload(e) for e in rows[:5000]], "truncated": rows.count() > 5000}
+
+
+def link_payment(reference, ref_code, note, user=None, ip=""):
+    """
+    Staff tie a Paystack payment that matched no booking to the patient's booking,
+    then confirm it exactly like any other payment. Returns (result, outcome, booking).
+    """
+    reference = _clean(reference)
+    ref_code = str(ref_code or "").strip().upper()
+    note = str(note or "").strip()
+    if not ref_code:
+        raise ReconcileError("Enter the booking reference to link this payment to.")
+    if len(note) < 3:
+        raise ReconcileError("Say how you know this payment is for that booking (e.g. the patient's receipt or phone call).")
+    from .reschedule_pay import is_reschedule_reference
+    if is_reschedule_reference(reference):
+        raise ReconcileError("This is a reschedule payment; it is already tied to its booking.")
+    try:
+        tx = ops.verify(reference)
+    except ops.OpsError as exc:
+        raise ReconcileError(str(exc))
+    if tx is None or str(tx.get("status") or "").lower() != "success":
+        raise ReconcileError("Paystack doesn't show a successful payment with this reference.")
+    current = payments.booking_ref_for(reference, tx)
+    if current and current.upper() != ref_code:
+        raise ReconcileError(f"This payment is already tied to booking {current}.")
+    booking = Booking.objects.filter(ref_code__iexact=ref_code).first()
+    if booking is None:
+        raise ReconcileError(f"There is no booking {ref_code} on this system.")
+    if payments.is_sponsored(booking.payment_type):
+        raise ReconcileError("That is an HMO or company booking; it isn't paid online.")
+    if booking.payment_status in (payments.PAYMENT_STATUS_PAID, payments.PAYMENT_STATUS_REFUNDED, payments.PAYMENT_STATUS_REFUND):
+        raise ReconcileError(f"Booking {booking.ref_code} is already settled ({booking.payment_status}). If the patient paid "
+                             "twice, open a refund for this payment instead.")
+    paid_kobo = int(tx.get("amount") or 0)
+    doctor = Doctor.objects.filter(doc_id=booking.doctor_id).first()
+    fee = Decimal(booking.fee_amount or (payments.clinic_fee(doctor, booking.visit_type) if doctor else 0) or 0)
+    if fee <= 0:
+        raise ReconcileError("That booking's clinic has no consultation fee, so there is nothing to confirm with this payment.")
+    if paid_kobo < payments.to_kobo(fee):
+        raise ReconcileError(f"This payment (₦{_naira(paid_kobo):,.2f}) is less than the booking's clinic fee (₦{fee:,.2f}), "
+                             "so it can't confirm the booking. Open a refund or collect the balance at the Cashdesk.")
+    if not booking.fee_amount:
+        # Booked without online payment (e.g. pay-at-cashdesk); record the fee this payment covers.
+        Booking.objects.filter(ref_code=booking.ref_code).update(fee_amount=fee, payment_method=payments.ONLINE_METHOD)
+    PaymentAttempt.objects.update_or_create(reference=reference, defaults={
+        "booking_ref": booking.ref_code, "amount_kobo": paid_kobo})
+    from . import payment_ledger as ledger
+    ledger.record("payment_linked", reference=reference, booking=booking, amount=_naira(paid_kobo), source="staff",
+                  actor=ops._who(user), ip=ip, note=note[:400])
+    booking, outcome = payments.confirm_payment(reference, tx, source="staff", actor=ops._who(user), ip=ip)
+    if booking is not None:
+        booking.refresh_from_db()
+    result = _result(reference, tx, booking, "payment_linked", user)
+    result["outcome"] = outcome
+    _log(result, user, PaymentCheck.ACTION_CONFIRM, f"Linked to {ref_code}: {outcome}")
+    return result, outcome, booking
+
+
+def resolve_unmatched(reference, action, note, user=None, ip=""):
+    """A payment with no booking: 'dismiss' (not a booking payment) or 'refund' (open a refund)."""
+    reference = _clean(reference)
+    note = str(note or "").strip()
+    if len(note) < 3:
+        raise ReconcileError("Add a short note explaining the decision.")
+    try:
+        tx = ops.verify(reference)
+    except ops.OpsError as exc:
+        raise ReconcileError(str(exc))
+    if tx is None or str(tx.get("status") or "").lower() != "success":
+        raise ReconcileError("Paystack doesn't show a successful payment with this reference.")
+    if payments.booking_ref_for(reference, tx):
+        raise ReconcileError("This payment matches a booking; check it instead.")
+    from . import payment_ledger as ledger
+    amount = _naira(tx.get("amount"))
+    if action == "dismiss":
+        ledger.record("unmatched_dismissed", reference=reference, amount=amount, source="staff", actor=ops._who(user),
+                      ip=ip, note=note[:400], once=True)
+    elif action == "refund":
+        ledger.open_refund(reference=reference, booking=None, amount=amount, reason="other",
+                           note=f"Payment with no booking: {note}"[:500], created_by=ops._who(user) or "staff")
+    else:
+        raise ReconcileError("Unknown action.")
+    result = _result(reference, tx, None, "", user)
+    _log(result, user, PaymentCheck.ACTION_CHECK, f"Unmatched payment: {action}")
+    return result

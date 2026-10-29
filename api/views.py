@@ -1163,6 +1163,31 @@ def public_reschedule_problem(booking, data):
 LIFECYCLE_STATUSES = {"Pending", "Confirmed", "Checked In", "Completed", "Cancelled"}
 
 
+def payment_extras(bookings):
+    """
+    {ref_code: {"reschedule_total", "reschedule_count", "channel"}} for a list of
+    bookings, in two queries (reschedule fees paid, and how the paid online
+    payment was made: card, bank transfer, USSD...).
+    """
+    from collections import defaultdict
+    from .models import PaymentAttempt, ReschedulePayment
+
+    refs = [b.ref_code for b in bookings]
+    out = defaultdict(dict)
+    if not refs:
+        return {}
+    for rp in ReschedulePayment.objects.filter(booking_ref__in=refs, status="applied").only("booking_ref", "amount"):
+        row = out[rp.booking_ref]
+        row["reschedule_total"] = round(row.get("reschedule_total", 0.0) + float(rp.amount), 2)
+        row["reschedule_count"] = row.get("reschedule_count", 0) + 1
+    paid_refs = {b.invoice_ref: b.ref_code for b in bookings if getattr(b, "invoice_ref", "")}
+    if paid_refs:
+        for a in PaymentAttempt.objects.filter(reference__in=list(paid_refs), status="success").only("reference", "channel"):
+            if a.channel:
+                out[paid_refs[a.reference]]["channel"] = a.channel
+    return dict(out)
+
+
 class BookingViewSet(viewsets.ModelViewSet):
     """
     Booking API.
@@ -1197,6 +1222,16 @@ class BookingViewSet(viewsets.ModelViewSet):
         if self.action in ("list", "disabled_bookings"):
             return BookingListSerializer
         return BookingSerializer
+
+    def get_serializer(self, *args, **kwargs):
+        # Lists carry payment extras (reschedule fees paid, Paystack channel) loaded in one batch.
+        if kwargs.get("many") and args and "payment_extras" not in kwargs.get("context", {}):
+            rows = list(args[0])
+            ctx = self.get_serializer_context()
+            ctx["payment_extras"] = payment_extras(rows)
+            kwargs["context"] = ctx
+            args = (rows,) + tuple(args[1:])
+        return super().get_serializer(*args, **kwargs)
 
     def perform_authentication(self, request):
         # Public endpoints must keep working when a stale token is sent.
@@ -1321,7 +1356,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             return Response({
                 "server_time": server_time.isoformat(),
                 "full": False,
-                "results": BookingListSerializer(active, many=True).data,
+                "results": BookingListSerializer(active, many=True, context={"payment_extras": payment_extras(active)}).data,
                 "removed": removed,
             })
 
@@ -1329,10 +1364,11 @@ class BookingViewSet(viewsets.ModelViewSet):
         date_from = parse_date(request.query_params.get("date_from"))
         if date_from:
             qs = qs.filter(date__gte=date_from.isoformat())
+        rows = list(qs)
         return Response({
             "server_time": server_time.isoformat(),
             "full": date_from is None,
-            "results": BookingListSerializer(qs, many=True).data,
+            "results": BookingListSerializer(rows, many=True, context={"payment_extras": payment_extras(rows)}).data,
             "removed": [],
         })
 
@@ -1619,6 +1655,11 @@ class BookingViewSet(viewsets.ModelViewSet):
         ).select_related("department").first()
         if not doctor:
             return Response({"duplicate": False})
+        # The rule applies to HMO and Company patients only.
+        from . import payments as _payments
+        pay_type = request.query_params.get("payment_type")
+        if pay_type and not _payments.is_sponsored(pay_type):
+            return Response({"duplicate": False})
         existing = find_duplicate_booking(
             doctor,
             request.query_params.get("patient_name"),
@@ -1732,8 +1773,9 @@ class BookingViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # Restoring must not create a double booking for the same patient.
-        if doctor:
+        # Restoring must not create a double booking for the same patient
+        # (HMO and Company patients; Private Self-Pay may hold several).
+        if doctor and is_sponsored_booking(booking):
             from .duplicates import duplicate_message, find_duplicate_booking
             existing = find_duplicate_booking(
                 doctor, booking.patient_name, booking.patient_phone,
