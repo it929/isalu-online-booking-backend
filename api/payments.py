@@ -50,6 +50,9 @@ ONLINE_METHOD = "Paystack (online)"
 PAYMENT_STATUS_AWAITING = "Awaiting Online Payment"
 PAYMENT_STATUS_PAID = "Cleared"
 PAYMENT_STATUS_REFUND = "Refund Due"
+PAYMENT_STATUS_REFUNDED = "Refunded"
+PAYMENT_STATUS_REVERSED = "Reversed"
+PAYMENT_STATUS_DISPUTED = "Disputed"
 
 
 class PaymentError(Exception):
@@ -292,10 +295,7 @@ def hmo_notice_message(doctor_label, opens_at, bookable_now=None, clinic_start=N
     )
     if bookable_now:
         text += f" The next clinic you can book with {yours} now is {timezone.localtime(bookable_now['start']).strftime('%A, %d %B %Y').replace(' 0', ' ')}."
-    return text + (
-        " If you can't wait, book as Private Self-Pay and pay online now. Private patients can book "
-        f"any open space at any time, so this space may be taken before {who} booking opens."
-    )
+    return text
 
 
 # ------------------------------------------------------------------
@@ -343,6 +343,9 @@ def valid_webhook_signature(raw_body, signature):
 
 
 def _patient_email(booking):
+    # Booking for someone else: the person making the booking is the one paying.
+    if getattr(booking, "booked_for_other", False) and (booking.booker_email or "").strip():
+        return booking.booker_email.strip()
     email = (booking.patient_email or "").strip()
     if email:
         return email
@@ -378,6 +381,11 @@ def open_transaction(booking, callback_url):
     })
     booking.payment_reference = data.get("reference") or reference
     booking.save(update_fields=["payment_reference"])
+    from .models import PaymentAttempt
+    PaymentAttempt.objects.get_or_create(
+        reference=booking.payment_reference,
+        defaults={"booking_ref": booking.ref_code, "amount_kobo": to_kobo(booking.fee_amount), "currency": "NGN"},
+    )
     return {
         "authorization_url": data.get("authorization_url"),
         "access_code": data.get("access_code"),
@@ -389,44 +397,150 @@ def open_transaction(booking, callback_url):
 # Confirmation (verify endpoint and webhook share this)
 # ------------------------------------------------------------------
 
-def _booking_for_reference(reference):
-    return Booking.objects.select_for_update().filter(payment_reference=reference).first()
+def tx_ref_code(tx):
+    """The booking reference Paystack carries in the transaction's metadata."""
+    meta = (tx or {}).get("metadata")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            meta = {}
+    if not isinstance(meta, dict):
+        return ""
+    if meta.get("ref_code"):
+        return str(meta["ref_code"]).strip()
+    for field in meta.get("custom_fields") or []:
+        if isinstance(field, dict) and field.get("variable_name") == "ref_code" and field.get("value"):
+            return str(field["value"]).strip()
+    return ""
 
 
-def confirm_payment(reference, transaction_data=None):
+def booking_ref_for(reference, tx=None):
+    """
+    Which booking a Paystack reference paid for: the booking's current
+    reference, any earlier attempt (the patient pressed Pay twice), or the
+    booking reference Paystack carries in the metadata.
+    """
+    from .models import PaymentAttempt
+
+    b = Booking.objects.filter(payment_reference=reference).values_list("ref_code", flat=True).first()
+    if b:
+        return b
+    b = Booking.objects.filter(invoice_ref=reference, payment_method=ONLINE_METHOD).values_list("ref_code", flat=True).first()
+    if b:
+        return b
+    attempt = PaymentAttempt.objects.filter(reference=reference).values_list("booking_ref", flat=True).first()
+    if attempt:
+        return attempt
+    code = tx_ref_code(tx)
+    if code and Booking.objects.filter(ref_code=code).exists():
+        return code
+    return None
+
+
+def _note_attempt(reference, ref_code, tx):
+    from .models import PaymentAttempt
+
+    status = str(tx.get("status") or "").lower() or "unknown"
+    paid_at = None
+    if status == "success" and (tx.get("paid_at") or tx.get("paidAt")):
+        from django.utils.dateparse import parse_datetime
+        paid_at = parse_datetime(str(tx.get("paid_at") or tx.get("paidAt")))
+    auth = tx.get("authorization") or {}
+    fields = {
+        "status": status[:20],
+        "paystack_id": str(tx.get("id") or "")[:40],
+        "paid_kobo": int(tx.get("amount") or 0) if status == "success" else None,
+        "fees_kobo": int(tx["fees"]) if tx.get("fees") not in (None, "") else None,
+        "channel": str(tx.get("channel") or auth.get("channel") or "")[:40],
+        "currency": str(tx.get("currency") or "NGN")[:5],
+        "last_checked_at": timezone.now(),
+    }
+    if paid_at:
+        fields["paid_at"] = paid_at
+    attempt, created = PaymentAttempt.objects.get_or_create(
+        reference=reference, defaults={"booking_ref": ref_code or "", "amount_kobo": int(tx.get("amount") or 0), **fields})
+    if not created:
+        PaymentAttempt.objects.filter(pk=attempt.pk).update(**fields)
+
+
+def confirm_payment(reference, transaction_data=None, source="verify", actor="", ip=""):
     """
     Confirm the booking paid with this Paystack reference.
 
-    `transaction_data` is the verified transaction (from the webhook); when it
-    is missing the transaction is fetched from Paystack. Safe to call twice.
-    Returns (booking, outcome) where outcome is one of
-    "paid", "already_paid", "pending", "failed", "refund_due", "not_found".
+    `transaction_data` is the verified transaction; when it is missing it is
+    fetched from Paystack. Safe to call twice, and from several places at once
+    (browser return, webhook, automatic check, staff): the booking row is
+    locked while it is updated. Returns (booking, outcome), outcome one of
+    "paid", "already_paid", "duplicate", "pending", "failed", "underpaid",
+    "refund_due", "not_found".
+
+    Every outcome that involves money is written to the ledger
+    (PaymentEvent), and money owed back opens a Refund.
     """
+    from . import payment_ledger as ledger
+
     reference = str(reference or "").strip()
     if not reference:
         return None, "not_found"
 
+    # A reschedule service charge, not a booking payment.
+    from .reschedule_pay import confirm_reschedule, is_reschedule_reference
+    if is_reschedule_reference(reference):
+        return confirm_reschedule(reference, transaction_data, source=source, actor=actor, ip=ip)
+
     if transaction_data is None:
-        transaction_data = _paystack("GET", f"/transaction/verify/{urllib.parse.quote(reference)}")
+        transaction_data = _paystack("GET", f"/transaction/verify/{urllib.parse.quote(reference, safe='')}")
+    tx = transaction_data or {}
+    tx_status = str(tx.get("status") or "").lower()
+    paid_kobo = int(tx.get("amount") or 0)
+    paid_naira = (Decimal(paid_kobo) / 100).quantize(Decimal("0.01"))
+
+    ref_code = booking_ref_for(reference, tx)
+    _note_attempt(reference, ref_code, tx)
+
+    if ref_code is None:
+        if tx_status == "success" and (reference.upper().startswith("ISALU-") or tx_ref_code(tx)):
+            ledger.record("unmatched_payment", reference=reference, amount=paid_naira, source=source, actor=actor, ip=ip,
+                          note="Paystack received this payment but no booking matches it.", once=True)
+        return None, "not_found"
 
     with transaction.atomic():
-        booking = _booking_for_reference(reference)
+        booking = Booking.objects.select_for_update().filter(ref_code=ref_code).first()
         if booking is None:
             return None, "not_found"
-        if booking.payment_status == PAYMENT_STATUS_PAID and booking.paid_at:
-            return booking, "already_paid"
-        if booking.payment_status == PAYMENT_STATUS_REFUND:
-            return booking, "refund_due"
 
-        tx_status = str(transaction_data.get("status") or "").lower()
+        paid_ref = (booking.invoice_ref or "") if booking.payment_method == ONLINE_METHOD else ""
+        already_paid = booking.payment_status in (PAYMENT_STATUS_PAID, PAYMENT_STATUS_DISPUTED) and booking.paid_at
+
         if tx_status != "success":
+            if already_paid:
+                return booking, "already_paid"
             return booking, ("failed" if tx_status in ("failed", "reversed") else "pending")
 
+        # ---- Paystack says this reference was paid ----------------------------
+        if already_paid or booking.payment_status in (PAYMENT_STATUS_REFUND, PAYMENT_STATUS_REFUNDED):
+            if reference == paid_ref or (booking.payment_status == PAYMENT_STATUS_REFUND and reference == booking.payment_reference):
+                return booking, ("already_paid" if already_paid else "refund_due")
+            # A second payment for a booking that is already settled.
+            if ledger.record("duplicate_payment", reference=reference, booking=booking, amount=paid_naira, source=source,
+                             actor=actor, ip=ip, once=True,
+                             note=f"Booking already settled ({booking.payment_status}, {booking.payment_method or 'unknown'}"
+                                  + (f", {paid_ref}" if paid_ref else "") + "). Refund this payment."):
+                ledger.open_refund(reference=reference, booking=booking, amount=paid_naira, reason="duplicate",
+                                   note="Second payment for the same booking.")
+            return booking, "duplicate"
+
         expected = to_kobo(booking.fee_amount or 0)
-        paid_kobo = int(transaction_data.get("amount") or 0)
-        if str(transaction_data.get("currency") or "NGN").upper() != "NGN" or paid_kobo < expected:
+        if str(tx.get("currency") or "NGN").upper() != "NGN" or paid_kobo < expected:
             logger.error("Paystack amount mismatch for %s: paid %s, expected %s", reference, paid_kobo, expected)
-            return booking, "failed"
+            if ledger.record("underpaid", reference=reference, booking=booking, amount=paid_naira, source=source,
+                             actor=actor, ip=ip, once=True,
+                             note=f"Paid {paid_naira} {tx.get('currency') or 'NGN'}; the clinic fee is "
+                                  f"{Decimal(expected) / 100:.2f} NGN. Refund it or collect the balance at the Cashdesk."):
+                ledger.open_refund(reference=reference, booking=booking, amount=paid_naira, reason="underpaid",
+                                   note="Paid less than the clinic fee.")
+            return booking, "underpaid"
 
         # The booking records the clinic's consultation fee exactly. If the Paystack
         # account passes its transaction charges to customers, the amount charged is
@@ -434,12 +548,12 @@ def confirm_payment(reference, transaction_data=None):
         amount = Decimal(booking.fee_amount or 0).quantize(Decimal("0.01"))
         if paid_kobo > expected:
             logger.info("Paystack %s: charged %s kobo for a %s kobo fee (customer-paid charges)", reference, paid_kobo, expected)
-        paid_at = timezone.now()
         common = {
             "amount_paid": amount,
-            "paid_at": paid_at,
+            "paid_at": timezone.now(),
             "payment_method": ONLINE_METHOD,
             "invoice_ref": reference,
+            "payment_reference": reference,
         }
 
         # Paid in time, or paid late but the slot is still free: confirm.
@@ -450,19 +564,20 @@ def confirm_payment(reference, transaction_data=None):
             capacity = resolve_doctor_day(doctor, day)["capacity"] if doctor and day else 0
             still_held = bool(doctor) and count_doctor_bookings(booking.doctor_id, booking.date, exclude_ref=booking.ref_code) < capacity
 
+        for k, v in common.items():
+            setattr(booking, k, v)
         if still_held:
-            for k, v in common.items():
-                setattr(booking, k, v)
             booking.status = "Confirmed"
             booking.payment_status = PAYMENT_STATUS_PAID
             booking.delete_reason = ""
             booking.payment_expires_at = None
             booking.save()
+            ledger.record("payment_confirmed", reference=reference, booking=booking, amount=amount, source=source,
+                          actor=actor, ip=ip, data={"charged": float(paid_naira), "fees": (int(tx["fees"]) / 100) if tx.get("fees") else None})
+            ledger.notify_patient(booking.ref_code, "paid", amount=amount)
             return booking, "paid"
 
         # Money received but someone else took the slot after the hold ended.
-        for k, v in common.items():
-            setattr(booking, k, v)
         booking.status = PAYMENT_EXPIRED
         booking.payment_status = PAYMENT_STATUS_REFUND
         booking.delete_reason = (
@@ -470,4 +585,9 @@ def confirm_payment(reference, transaction_data=None):
             "Refund the patient or book them another date."
         )
         booking.save()
+        ledger.record("paid_clinic_full", reference=reference, booking=booking, amount=paid_naira, source=source,
+                      actor=actor, ip=ip, once=True, note="Paid after the hold ended; the clinic had filled.")
+        ledger.open_refund(reference=reference, booking=booking, amount=paid_naira, reason="clinic_full",
+                           note="Paid after the clinic filled.")
+        ledger.notify_patient(booking.ref_code, "refund_due", amount=paid_naira)
         return booking, "refund_due"

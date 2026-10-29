@@ -603,6 +603,11 @@ class BookingSerializer(serializers.ModelSerializer):
             "deleteReason": "delete_reason",
             "visitType": "visit_type",
             "followUpAcknowledged": "follow_up_acknowledged",
+            "hospitalCardNumber": "hospital_card_number",
+            "bookedForOther": "booked_for_other",
+            "bookerName": "booker_name",
+            "bookerPhone": "booker_phone",
+            "bookerEmail": "booker_email",
         })
         data_copy.pop("ref_code", None)
         data_copy.pop("refCode", None)
@@ -675,6 +680,11 @@ class BookingSerializer(serializers.ModelSerializer):
         ret["paidAt"] = instance.paid_at.isoformat() if instance.paid_at else None
         ret["paymentReference"] = instance.payment_reference
         ret["paymentExpiresAt"] = instance.payment_expires_at.isoformat() if instance.payment_expires_at else None
+        ret["hospitalCardNumber"] = instance.hospital_card_number or ""
+        ret["bookedForOther"] = bool(instance.booked_for_other)
+        ret["bookerName"] = instance.booker_name or ""
+        ret["bookerPhone"] = instance.booker_phone or ""
+        ret["bookerEmail"] = instance.booker_email or ""
         return ret
 
     # ---------------------------------------------------------------
@@ -749,6 +759,26 @@ class BookingSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         from .views import is_staff_request  # local import: views imports this module
         staff = request is not None and is_staff_request(request)
+        # A follow-up must be within a month of the patient's last appointment in this
+        # clinic; after that, online bookings are a first visit (staff may override).
+        if request is not None and not staff and doc is not None and (inst is None or "visit_type" in data):
+            from .duplicates import FOLLOW_UP_WINDOW_DAYS, follow_up_locked
+            appt = parse_date(data.get("date") or (inst.date if inst else None))
+            locked, last_day = follow_up_locked(
+                doc,
+                data.get("patient_name", inst.patient_name if inst else ""),
+                data.get("patient_phone", inst.patient_phone if inst else ""),
+                data.get("hospital_card_number", inst.hospital_card_number if inst else ""),
+                appointment_date=appt,
+                exclude_ref=inst.ref_code if inst else None,
+            )
+            if locked:
+                raise self._error(
+                    f"Your last appointment in this clinic was more than {FOLLOW_UP_WINDOW_DAYS} days before this one, "
+                    "so this booking is a first visit. Please choose First visit to continue.",
+                    follow_up_locked=True,
+                    field="visit_type",
+                )
         agreed = data.get("follow_up_acknowledged", inst.follow_up_acknowledged if inst else False)
         agreed = agreed is True or str(agreed).strip().lower() in ("true", "1", "yes", "on")
         data["follow_up_acknowledged"] = agreed
@@ -779,6 +809,52 @@ class BookingSerializer(serializers.ModelSerializer):
         if problem:
             raise self._error(problem, field="patient_phone", invalid_phone=True)
         data["patient_phone"] = " ".join(str(data["patient_phone"]).split())
+
+    CARD_NUMBER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/\- ]{0,29}$")
+
+    def _validate_card_and_booker(self, data):
+        """
+        Hospital card number: optional; letters, numbers, '/', '-' and spaces.
+        Booked for someone else: the booker's full name and phone are required
+        (a Nigerian mobile for online bookings), email optional. Otherwise the
+        booker fields are cleared.
+        """
+        inst = self.instance
+        if "hospital_card_number" in data:
+            card = " ".join(str(data.get("hospital_card_number") or "").split()).upper()
+            if card and not self.CARD_NUMBER_RE.match(card):
+                raise self._error("Hospital card number can only contain letters, numbers, '/' and '-' (up to 30 characters).",
+                                  field="hospital_card_number")
+            data["hospital_card_number"] = card
+
+        keys = ("booked_for_other", "booker_name", "booker_phone", "booker_email")
+        if inst is not None and not any(k in data for k in keys):
+            return
+        flag = data.get("booked_for_other", inst.booked_for_other if inst else False)
+        flag = flag is True or str(flag).strip().lower() in ("true", "1", "yes", "on")
+        data["booked_for_other"] = flag
+        if not flag:
+            data["booker_name"] = ""
+            data["booker_phone"] = ""
+            data["booker_email"] = ""
+            return
+        name = " ".join(str(data.get("booker_name", inst.booker_name if inst else "") or "").split())
+        phone = " ".join(str(data.get("booker_phone", inst.booker_phone if inst else "") or "").split())
+        email = str(data.get("booker_email", inst.booker_email if inst else "") or "").strip()
+        if len(name) < 2:
+            raise self._error("Enter your full name (the person making this booking).", field="booker_name")
+        if not phone:
+            raise self._error("Enter your phone number (the person making this booking).", field="booker_phone")
+        request = self.context.get("request")
+        from .views import is_staff_request  # local import: views imports this module
+        if request is not None and not is_staff_request(request):
+            from .phone import nigerian_mobile_problem
+            problem = nigerian_mobile_problem(phone)
+            if problem:
+                raise self._error("Your phone number: " + problem[0].lower() + problem[1:], field="booker_phone", invalid_phone=True)
+        data["booker_name"] = name[:200]
+        data["booker_phone"] = phone[:30]
+        data["booker_email"] = email
 
     def _validate_company(self, data):
         """
@@ -839,6 +915,7 @@ class BookingSerializer(serializers.ModelSerializer):
         inst = self.instance
         self._validate_company(data)
         self._validate_phone(data)
+        self._validate_card_and_booker(data)
         self._validate_visit_type(data)
 
         if not self._scheduling_changed(data):

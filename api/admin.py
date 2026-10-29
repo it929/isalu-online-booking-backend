@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, Company, CustomTimeSlot, Role, UserProfile
+from .models import Department, Doctor, SpecialistSchedule, Booking, HmoCompany, Company, CustomTimeSlot, Role, UserProfile, PaymentCheck, PaymentAttempt, PaymentEvent, Refund, WebhookEvent
 
 @admin.register(Department)
 class DepartmentAdmin(admin.ModelAdmin):
@@ -60,3 +60,51 @@ class UserProfileAdmin(admin.ModelAdmin):
 class CustomTimeSlotAdmin(admin.ModelAdmin):
     list_display = ('slot_id', 'label', 'created_at')
     search_fields = ('label',)
+
+
+class ReadOnlyAdmin(admin.ModelAdmin):
+    """Audit records: viewable, never added, edited or deleted from the admin."""
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PaymentCheck)
+class PaymentCheckAdmin(ReadOnlyAdmin):
+    list_display = ('created_at', 'reference', 'ref_code', 'patient_name', 'action', 'paystack_status', 'amount', 'verdict', 'checked_by')
+    search_fields = ('reference', 'ref_code', 'patient_name', 'checked_by')
+    list_filter = ('action', 'verdict')
+
+
+@admin.register(PaymentEvent)
+class PaymentEventAdmin(ReadOnlyAdmin):
+    list_display = ('created_at', 'kind', 'reference', 'ref_code', 'patient_name', 'amount', 'source', 'actor')
+    search_fields = ('reference', 'ref_code', 'patient_name', 'actor', 'note')
+    list_filter = ('kind', 'source')
+
+
+@admin.register(PaymentAttempt)
+class PaymentAttemptAdmin(ReadOnlyAdmin):
+    list_display = ('created_at', 'reference', 'booking_ref', 'amount_kobo', 'status', 'paid_at', 'last_checked_at')
+    search_fields = ('reference', 'booking_ref')
+    list_filter = ('status',)
+
+
+@admin.register(Refund)
+class RefundAdmin(ReadOnlyAdmin):
+    list_display = ('created_at', 'reference', 'ref_code', 'patient_name', 'amount', 'reason', 'status', 'method', 'processed_by')
+    search_fields = ('reference', 'ref_code', 'patient_name', 'paystack_refund_id')
+    list_filter = ('status', 'reason', 'method')
+
+
+@admin.register(WebhookEvent)
+class WebhookEventAdmin(ReadOnlyAdmin):
+    list_display = ('received_at', 'event', 'reference', 'result')
+    search_fields = ('reference',)
+    list_filter = ('event',)
