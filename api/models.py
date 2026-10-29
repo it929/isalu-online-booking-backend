@@ -634,6 +634,19 @@ class Booking(models.Model):
     # follow-up, the patient pays the balance up to the first-visit fee
     # (first_visit_fee, recorded at booking time). The patient agrees to this
     # on the booking form (follow_up_acknowledged).
+    # Optional hospital card number the patient typed on the booking form.
+    hospital_card_number = models.CharField(max_length=30, blank=True, default="", db_index=True)
+
+    # Booked by someone else (a relative, carer, employer...): their contact details.
+    # The patient's own name and phone stay in patient_name / patient_phone.
+    booked_for_other = models.BooleanField(default=False)
+    booker_name = models.CharField(max_length=200, blank=True, default="")
+    booker_phone = models.CharField(max_length=30, blank=True, default="")
+    booker_email = models.EmailField(blank=True, default="")
+
+    # When the patient was sent their payment receipt (SMS/email), so it goes once.
+    payment_receipt_sent_at = models.DateTimeField(null=True, blank=True)
+
     visit_type = models.CharField(max_length=20, default="First Visit", blank=True)
     follow_up_acknowledged = models.BooleanField(default=False)
     first_visit_fee = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
@@ -790,3 +803,200 @@ class ScheduleException(models.Model):
     def __str__(self):
         target = f" -> {self.new_date}" if self.action == self.ACTION_RESCHEDULE else ""
         return f"{self.doctor_id} {self.original_date} {self.action}{target}"
+
+
+class PaymentCheck(models.Model):
+    """
+    Payment Reconciliation log: every time staff check an online payment
+    reference against Paystack (and every booking they confirm from it).
+    """
+
+    ACTION_CHECK = "check"
+    ACTION_CONFIRM = "confirm"
+
+    reference = models.CharField(max_length=100, db_index=True)
+    ref_code = models.CharField(max_length=20, blank=True, default="", db_index=True)
+    patient_name = models.CharField(max_length=200, blank=True, default="")
+    action = models.CharField(max_length=10, default=ACTION_CHECK)
+    paystack_status = models.CharField(max_length=30, blank=True, default="")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    verdict = models.CharField(max_length=40, blank=True, default="")
+    note = models.CharField(max_length=300, blank=True, default="")
+    checked_by = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.reference} {self.action} {self.verdict} by {self.checked_by}"
+
+
+
+class PaymentAttempt(models.Model):
+    """
+    Every Paystack transaction the booking site opens. A patient who presses Pay
+    twice has two attempts; a late payment on the older one is still matched to
+    the booking through this table.
+    """
+
+    reference = models.CharField(max_length=100, unique=True)
+    booking_ref = models.CharField(max_length=20, db_index=True)
+    amount_kobo = models.BigIntegerField(default=0)
+    currency = models.CharField(max_length=5, default="NGN")
+    # initialized, success, failed, abandoned, reversed, pending, ...
+    status = models.CharField(max_length=20, default="initialized", db_index=True)
+    paystack_id = models.CharField(max_length=40, blank=True, default="")
+    paid_kobo = models.BigIntegerField(null=True, blank=True)
+    fees_kobo = models.BigIntegerField(null=True, blank=True)
+    channel = models.CharField(max_length=40, blank=True, default="")
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.reference} ({self.booking_ref}) {self.status}"
+
+
+class PaymentEvent(models.Model):
+    """
+    Append-only money ledger: confirmations, duplicate and short payments,
+    reversals, disputes, refunds and staff actions, with who/what caused them.
+    Never edited or deleted (the admin is read-only).
+    """
+
+    KINDS = [
+        ("payment_confirmed", "Payment confirmed"),
+        ("duplicate_payment", "Duplicate payment"),
+        ("underpaid", "Paid less than the fee"),
+        ("paid_clinic_full", "Paid after the clinic filled"),
+        ("unmatched_payment", "Payment with no booking"),
+        ("payment_reversed", "Payment reversed"),
+        ("dispute_opened", "Dispute opened"),
+        ("dispute_won", "Dispute resolved for the hospital"),
+        ("dispute_lost", "Dispute resolved for the patient"),
+        ("refund_requested", "Refund started"),
+        ("refund_processed", "Refund completed"),
+        ("refund_failed", "Refund failed"),
+        ("receipt_sent", "Patient notified"),
+        ("cleared_without_payment", "Cleared but Paystack shows no payment"),
+        ("reschedule_paid", "Reschedule fee paid"),
+        ("reschedule_not_applied", "Reschedule paid, new date no longer free"),
+    ]
+
+    kind = models.CharField(max_length=40, choices=KINDS, db_index=True)
+    reference = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    ref_code = models.CharField(max_length=20, blank=True, default="", db_index=True)
+    patient_name = models.CharField(max_length=200, blank=True, default="")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    # verify (patient's browser), webhook, sweep (automatic check), staff, system
+    source = models.CharField(max_length=20, default="system")
+    actor = models.CharField(max_length=200, blank=True, default="")
+    ip = models.CharField(max_length=60, blank=True, default="")
+    note = models.CharField(max_length=500, blank=True, default="")
+    data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M} {self.kind} {self.reference}"
+
+
+class Refund(models.Model):
+    """Money owed back to a patient, and how it was paid back."""
+
+    STATUS_DUE = "due"              # owed, nothing sent yet
+    STATUS_PENDING = "pending"      # sent to Paystack, waiting for the bank
+    STATUS_PROCESSED = "processed"  # paid back
+    STATUS_FAILED = "failed"        # Paystack couldn't refund; try again or pay manually
+    STATUS_CANCELLED = "cancelled"  # not owed after all (e.g. booked another date instead)
+    OPEN_STATUSES = (STATUS_DUE, STATUS_PENDING, STATUS_FAILED)
+
+    reference = models.CharField(max_length=100, db_index=True)   # the Paystack payment being refunded
+    ref_code = models.CharField(max_length=20, blank=True, default="", db_index=True)
+    patient_name = models.CharField(max_length=200, blank=True, default="")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    # duplicate, clinic_full, underpaid, other
+    reason = models.CharField(max_length=30, default="other")
+    status = models.CharField(max_length=20, default=STATUS_DUE, db_index=True)
+    # paystack, bank_transfer, cash ("" while due)
+    method = models.CharField(max_length=20, blank=True, default="")
+    paystack_refund_id = models.CharField(max_length=40, blank=True, default="", db_index=True)
+    note = models.CharField(max_length=500, blank=True, default="")
+    last_error = models.CharField(max_length=500, blank=True, default="")
+    created_by = models.CharField(max_length=200, blank=True, default="")
+    processed_by = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Refund {self.amount} for {self.reference} ({self.status})"
+
+
+class WebhookEvent(models.Model):
+    """Each Paystack webhook received once (replays are ignored)."""
+
+    key = models.CharField(max_length=64, unique=True)   # sha256 of the signed body
+    event = models.CharField(max_length=60, blank=True, default="")
+    reference = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    result = models.CharField(max_length=200, blank=True, default="")
+    received_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-received_at"]
+
+
+class PaymentJobState(models.Model):
+    """Lock and last result of the automatic payment check."""
+
+    key = models.CharField(max_length=40, primary_key=True)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    last_result = models.JSONField(default=dict, blank=True)
+
+
+
+class ReschedulePayment(models.Model):
+    """
+    A patient's online reschedule: the new date/time they chose and the
+    reschedule service charge they pay with Paystack. The booking moves only
+    once Paystack confirms the payment.
+    """
+
+    STATUS_INITIALIZED = "initialized"   # checkout opened, not paid yet
+    STATUS_APPLIED = "applied"           # paid and the booking moved
+    STATUS_NOT_APPLIED = "not_applied"   # paid, but the new date was no longer free (refund opened)
+    STATUS_FAILED = "failed"             # paid less than the charge (refund opened)
+    STATUS_REPLACED = "replaced"         # the patient started another reschedule instead
+
+    reference = models.CharField(max_length=100, unique=True)
+    booking_ref = models.CharField(max_length=20, db_index=True)
+    old_date = models.CharField(max_length=20, blank=True, default="")
+    old_time = models.CharField(max_length=100, blank=True, default="")
+    new_date = models.CharField(max_length=20)
+    new_time = models.CharField(max_length=100, blank=True, default="")
+    new_doctor_id = models.CharField(max_length=100, blank=True, default="")
+    reason = models.CharField(max_length=300, blank=True, default="")
+    base_fee = models.DecimalField(max_digits=12, decimal_places=2)
+    percent = models.PositiveIntegerField(default=25)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, default=STATUS_INITIALIZED, db_index=True)
+    note = models.CharField(max_length=500, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Reschedule {self.booking_ref} -> {self.new_date} ({self.status})"

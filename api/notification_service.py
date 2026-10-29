@@ -838,3 +838,111 @@ def send_test_notification(email: str = "", phone: str = "") -> dict:
                                "TEST", allow_console_fallback=False)
         result["sms"] = {"ok": ok, "message": msg, "to": normalize_ng_phone(phone)}
     return result
+
+
+# ---------------------------------------------------------------------------
+# Online payment notices (receipt, clinic full / refund due, refund sent)
+# ---------------------------------------------------------------------------
+
+def _naira_text(amount) -> str:
+    try:
+        return f"NGN {float(amount or 0):,.2f}"
+    except (TypeError, ValueError):
+        return "NGN 0.00"
+
+
+def _payment_notice_texts(booking, kind: str, amount=None):
+    patient_first = (booking.patient_name or "Patient").split()[0]
+    patient_name = booking.patient_name or "Valued Patient"
+    specialty = booking.doctor_specialty or "Clinic"
+    ref_code = booking.ref_code
+    day = format_booking_date_display(booking.date)
+    paid = _naira_text(amount if amount is not None else (booking.amount_paid or booking.fee_amount))
+
+    if kind == "paid":
+        subject = f"Payment received: {specialty} appointment on {day} [{ref_code}]"
+        sms = (f"ISALU HOSPITALS: Dear {patient_first}, we received your payment of {paid}. "
+               f"Your {specialty} appt {ref_code} on {_short_date(booking.date)}, {_short_time(booking.time)} is CONFIRMED. "
+               f"Show this ref at the front desk.")
+        headline = "Your payment is confirmed"
+        detail = (f"We received your online payment of <strong>{paid}</strong>. Your <strong>{specialty}</strong> "
+                  f"appointment on <strong>{day}</strong> ({booking.time or 'your clinic time'}) is confirmed.")
+        next_step = "Please show your reference code at the front desk when you arrive. You do not need to pay again."
+    elif kind == "refund_due":
+        subject = f"Payment received, clinic full: refund on the way [{ref_code}]"
+        sms = (f"ISALU HOSPITALS: Dear {patient_first}, we received {paid} for appt {ref_code}, but the clinic filled "
+               f"before your payment arrived. We will refund you or book another date. Call {HOSPITAL_PHONE}.")
+        headline = "We received your payment, but the clinic was full"
+        detail = (f"Your payment of <strong>{paid}</strong> for appointment <strong>{ref_code}</strong> reached us after "
+                  f"your slot hold ended, and the {specialty} clinic on {day} had filled by then.")
+        next_step = (f"Our team will refund you, or book you another date if you prefer. "
+                     f"Call {HOSPITAL_PHONE} to choose. Please don't pay again for this booking.")
+    elif kind == "rescheduled":
+        subject = f"Appointment rescheduled to {day} [{ref_code}]"
+        sms = (f"ISALU HOSPITALS: Dear {patient_first}, we received your reschedule fee of {paid}. "
+               f"Your {specialty} appt {ref_code} is now on {_short_date(booking.date)}, {_short_time(booking.time)}.")
+        headline = "Your appointment has been rescheduled"
+        detail = (f"We received your reschedule service charge of <strong>{paid}</strong>. Your <strong>{specialty}</strong> "
+                  f"appointment is now on <strong>{day}</strong> ({booking.time or 'your clinic time'}).")
+        next_step = "Your reference code stays the same. You'll get the usual reminder before your appointment."
+    else:  # refunded
+        subject = f"Refund sent: {paid} [{ref_code}]"
+        sms = (f"ISALU HOSPITALS: Dear {patient_first}, we have refunded {paid} for appt {ref_code}. "
+               f"Depending on your bank it can take up to 10 working days to show. Call {HOSPITAL_PHONE} with questions.")
+        headline = "Your refund has been sent"
+        detail = f"We have refunded <strong>{paid}</strong> for appointment <strong>{ref_code}</strong>."
+        next_step = "Depending on your bank, it can take up to 10 working days to appear in your account."
+
+    html = f"""
+    <html><body style="font-family: Arial, sans-serif; color:#0f172a; background:#f8fafc; padding:24px;">
+      <div style="max-width:560px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:16px; padding:24px;">
+        <h2 style="color:#008ac9; margin-top:0;">{HOSPITAL_NAME}</h2>
+        <h3 style="margin-bottom:8px;">{headline}</h3>
+        <p>Dear {_html.escape(patient_name)},</p>
+        <p>{detail}</p>
+        <p>{next_step}</p>
+        <p style="font-size:13px; color:#475569;">Reference code: <strong>{ref_code}</strong></p>
+        <hr style="border:none; border-top:1px solid #e2e8f0;">
+        <p style="font-size:12px; color:#64748b;">{HOSPITAL_NAME} &bull; {HOSPITAL_ADDRESS}<br>
+        Phone: {HOSPITAL_PHONE} | Email: {HOSPITAL_EMAIL}</p>
+      </div>
+    </body></html>
+    """
+    plain = re.sub(r"<[^>]+>", "", f"{headline}\n\nDear {patient_name},\n\n{detail}\n\n{next_step}\n\n"
+                   f"Reference: {ref_code}\n{HOSPITAL_NAME}, {HOSPITAL_PHONE}")
+    return subject, sms, html, plain
+
+
+def send_payment_notice(booking, kind: str, amount=None) -> dict:
+    """SMS + email about an online payment. Failures are reported, never raised."""
+    subject, sms_text, html, plain = _payment_notice_texts(booking, kind, amount)
+
+    email = (booking.patient_email or "").strip()
+    email_status = email_backend_status()
+    if email and "@" in email and not email.lower().startswith("patient-") and email_status["configured"]:
+        try:
+            from_email = getattr(settings, "DEFAULT_FROM_EMAIL", "Isalu Hospitals <no-reply@isalu.ng>")
+            msg = EmailMultiAlternatives(subject, plain, from_email, [email])
+            msg.attach_alternative(html, "text/html")
+            msg.send(fail_silently=False)
+            email_ok, email_msg = True, "Email sent"
+        except Exception as exc:
+            logger.warning(f"Payment notice email failed for {booking.ref_code}: {exc}")
+            email_ok, email_msg = False, f"Email failed: {exc}"
+    elif email and "@" in email and not email_status["configured"]:
+        email_ok, email_msg = False, "Email not configured"
+    else:
+        email_ok, email_msg = None, "No email address on file"
+
+    phone = (booking.patient_phone or "").strip()
+    if phone and len(phone) >= 7:
+        try:
+            sms_ok, sms_msg = dispatch_sms(phone, sms_text, booking.ref_code, allow_console_fallback=False)
+        except Exception as exc:
+            sms_ok, sms_msg = False, f"SMS failed: {exc}"
+    else:
+        sms_ok, sms_msg = None, "No phone number on file"
+
+    channels = [ok for ok in (email_ok, sms_ok) if ok is not None]
+    return {"email_sent": email_ok, "email_message": email_msg, "sms_sent": sms_ok, "sms_message": sms_msg,
+            "delivered": any(channels)}
