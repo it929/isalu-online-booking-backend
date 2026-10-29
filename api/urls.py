@@ -20,7 +20,7 @@ from .views import (
     ScheduleExceptionViewSet,
 )
 
-from .payment_views import RescheduleQuoteView, RescheduleStartView, RescheduleVerifyView, PaymentConfigView, PaystackWebhookView, PaymentReconcileView, PaymentReportView, ReconcileDailyView, ReconcileLedgerView, ReconcileRefundView, ReconcileSweepView, StartPaymentView, VerifyPaymentView
+from .payment_views import PaymentConfigView, PaystackWebhookView, PaymentReportView, StartPaymentView, VerifyPaymentView
 
 router = DefaultRouter()
 router.register(r'departments', DepartmentViewSet, basename='department')
@@ -47,13 +47,5 @@ urlpatterns = [
     path('payments/verify/', VerifyPaymentView.as_view(), name='payment-verify'),
     path('payments/paystack-webhook/', PaystackWebhookView.as_view(), name='paystack-webhook'),
     path('payments/report/', PaymentReportView.as_view(), name='payment-report'),
-    path('payments/reconcile/', PaymentReconcileView.as_view(), name='payment-reconcile'),
-    path('payments/reschedule/quote/', RescheduleQuoteView.as_view(), name='reschedule-quote'),
-    path('payments/reschedule/start/', RescheduleStartView.as_view(), name='reschedule-start'),
-    path('payments/reschedule/verify/', RescheduleVerifyView.as_view(), name='reschedule-verify'),
-    path('payments/reconcile/refunds/', ReconcileRefundView.as_view(), name='payment-reconcile-refunds'),
-    path('payments/reconcile/daily/', ReconcileDailyView.as_view(), name='payment-reconcile-daily'),
-    path('payments/reconcile/ledger/', ReconcileLedgerView.as_view(), name='payment-reconcile-ledger'),
-    path('payments/reconcile/sweep/', ReconcileSweepView.as_view(), name='payment-reconcile-sweep'),
     path('', include(router.urls)),
 ]
