@@ -459,7 +459,8 @@ def run_permission_tests(client, today_str):
     r = staff.post('/api/auth/staff-login/', {'username': 'reception@isaluhospitals.com', 'password': 'admin123'}, format='json')
     assert r.status_code == 200, r.data
     u = r.data['user']
-    assert u['isAdmin'] is False and u['allowedDesks'] == ['helpdesk', 'all_patients', 'checked_in_patients'], u
+    # Helpdesk also gets Payment Reconciliation (check private patients' online payments).
+    assert u['isAdmin'] is False and u['allowedDesks'] == ['helpdesk', 'all_patients', 'checked_in_patients', 'payment_reconciliation'], u
     staff.credentials(HTTP_AUTHORIZATION=f"Bearer {r.data['tokens']['access']}")
     admin_login = APIClient().post('/api/auth/staff-login/', {'username': 'admin@isaluhospitals.com', 'password': 'admin123'}, format='json').data['user']
     assert admin_login['isAdmin'] is True and 'users' in admin_login['allowedDesks']

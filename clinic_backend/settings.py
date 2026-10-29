@@ -122,13 +122,9 @@ else:
 
 # Database
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.mysql",
-        "NAME": os.getenv("DB_NAME", "isalu"),
-        "USER": os.getenv("DB_USER"),
-        "PASSWORD": os.getenv("DB_PASSWORD"),
-        "HOST": os.getenv("DB_HOST", "db"),
-        "PORT": os.getenv("DB_PORT", "3306"),
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
     }
 }
 
@@ -151,6 +147,8 @@ REST_FRAMEWORK = {
         'login': os.getenv('THROTTLE_LOGIN', '10/min'),                  # password guessing
         'public_booking': os.getenv('THROTTLE_PUBLIC_BOOKING', '30/hour'),  # booking spam
         'public_lookup': os.getenv('THROTTLE_PUBLIC_LOOKUP', '30/min'),    # enumeration
+        'payment_reconcile': os.getenv('PAYMENT_RECONCILE_RATE', '60/min'),  # staff checks (each calls Paystack)
+        'payment_money': os.getenv('PAYMENT_MONEY_RATE', '20/min'),          # staff confirmations and refunds
     },
 }
 
@@ -251,6 +249,27 @@ EBULKSMS_USERNAME = os.getenv('EBULKSMS_USERNAME', '').strip()
 EBULKSMS_API_KEY = os.getenv('EBULKSMS_API_KEY', '').strip()
 EBULKSMS_SENDER_ID = os.getenv('EBULKSMS_SENDER_ID', 'ISALU').strip()
 EBULKSMS_API_URL = os.getenv('EBULKSMS_API_URL', 'https://api.ebulksms.com/sendsms.json').strip()
+
+
+# =========================================================
+# ONLINE PAYMENT (PAYSTACK) & BOOKING RULES
+# =========================================================
+# Private self-pay patients pay the clinic's consultation fee online before
+# their ticket is issued. Leave PAYSTACK_SECRET_KEY empty to switch online
+# payment off (patients then pay at the cashdesk, as before).
+PAYSTACK_SECRET_KEY = os.getenv('PAYSTACK_SECRET_KEY', '').strip()
+PAYSTACK_PUBLIC_KEY = os.getenv('PAYSTACK_PUBLIC_KEY', '').strip()
+PAYSTACK_API_URL = os.getenv('PAYSTACK_API_URL', 'https://api.paystack.co').strip().rstrip('/')
+# Public address of the booking site; Paystack sends patients back to
+# <PUBLIC_SITE_URL>/book after paying. Example: https://book.isaluhospitals.com
+PUBLIC_SITE_URL = os.getenv('PUBLIC_SITE_URL', '').strip().rstrip('/')
+# How long an unpaid online booking holds its slot.
+PAYMENT_HOLD_MINUTES = int(os.getenv('PAYMENT_HOLD_MINUTES', '30'))
+# Private self-pay patients booking online must pay before a ticket is issued.
+# Set to False only to go back to "pay at the cashdesk" (not recommended).
+PRIVATE_BOOKINGS_REQUIRE_PAYMENT = os.getenv('PRIVATE_BOOKINGS_REQUIRE_PAYMENT', 'True').lower() in ('true', '1')
+# HMO online booking for a clinic opens this many hours before it starts (closes 10 minutes before).
+HMO_MIN_NOTICE_HOURS = int(os.getenv('HMO_MIN_NOTICE_HOURS', '48'))
 
 
 

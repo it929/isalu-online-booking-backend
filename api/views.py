@@ -243,8 +243,11 @@ ALL_DESKS = [
     "helpdesk", "hmo", "cashdesk", "analytics", "monitor", "users", "all_patients",
     "checked_in_patients", "hmo_enrollees", "private_patients",
     "create_specialist_schedule", "clinic", "disabled_bookings", "hmo_declined",
-    "booking_payments", "companies", "cleared_patients",
+    "booking_payments", "companies", "cleared_patients", "payment_reconciliation",
 ]
+
+# Staff working any private (self-pay) module can check online payments.
+PRIVATE_PAYMENT_DESKS = ("helpdesk", "cashdesk", "private_patients", "booking_payments", "cleared_patients")
 
 # HMO and Company patients are covered by their sponsor and approved at the HMO desk.
 SPONSORED_TYPES_Q = Q(payment_type="HMO Insurance") | Q(payment_type__iexact="Company")
@@ -301,6 +304,9 @@ def build_staff_profile(user):
         if "monitor" in allowed and "all_patients" not in allowed:
             # Monitor operators look patients up in the All Patients Directory.
             allowed.append("all_patients")
+        if "payment_reconciliation" not in allowed and any(d in allowed for d in PRIVATE_PAYMENT_DESKS):
+            # Helpdesk, Cashdesk and the other private-patient modules confirm online payments.
+            allowed.append("payment_reconciliation")
     return {
         "id": user.id,
         "username": user.username,
@@ -604,6 +610,8 @@ PUBLIC_HIDDEN_FIELDS = (
     "referral_doc_data", "referral_doc_text", "referralDocData", "referralDocText",
     "patient_email", "patientEmail", "hmo_auth_code", "hmoAuthCode", "hmo_policy_code",
     "hmoPolicyCode", "delete_reason", "deleteReason", "invoice_ref", "invoiceRef",
+    # Whoever made the booking: their phone and email stay private.
+    "booker_phone", "bookerPhone", "booker_email", "bookerEmail",
 )
 
 
@@ -1124,6 +1132,34 @@ def public_doctor_switch_error(booking, new_doctor_ref):
         return f"The selected doctor does not accept {patient_type} patients. Please choose another doctor."
     return None
 
+def public_reschedule_problem(booking, data):
+    """None when a patient may reschedule this booking with these fields, else the error Response."""
+    keys = set(data.keys()) - {"ref_code", "refCode", "return_origin"}
+    new_status = str(data.get("status", "Confirmed")).strip().lower()
+    if (
+        not keys
+        or not keys.issubset(PUBLIC_RESCHEDULE_FIELDS)
+        or not ({"date", "time"} & keys)
+        or new_status not in PUBLIC_RESCHEDULE_STATUSES
+    ):
+        return staff_required_response("modify this booking")
+    if str(booking.status).lower() == "awaiting payment":
+        return Response(
+            {"error": "This booking isn't paid yet. Finish paying first, or start a new booking."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not booking.counts_toward_capacity or booking.status in ("Checked In", "Completed"):
+        return Response(
+            {"error": "This appointment can no longer be rescheduled online. Please contact reception."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if ({"doctor_id", "doctorId"} & keys):
+        switch_error = public_doctor_switch_error(booking, data.get("doctor_id") or data.get("doctorId"))
+        if switch_error:
+            return Response({"error": switch_error}, status=status.HTTP_400_BAD_REQUEST)
+    return None
+
+
 LIFECYCLE_STATUSES = {"Pending", "Confirmed", "Checked In", "Completed", "Cancelled"}
 
 
@@ -1153,7 +1189,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         throttles = super().get_throttles()
         if self.action == "create":
             throttles.append(PublicBookingThrottle())
-        elif self.action in ("public_lookup", "duplicate_check", "availability"):
+        elif self.action in ("public_lookup", "duplicate_check", "availability", "follow_up_check"):
             throttles.append(PublicLookupThrottle())
         return throttles
 
@@ -1367,29 +1403,21 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         if not staff:
             # Patients may only reschedule (date/time) their own booking.
-            new_status = str(request.data.get("status", "Confirmed")).strip().lower()
-            if (
-                not keys
-                or not keys.issubset(PUBLIC_RESCHEDULE_FIELDS)
-                or not ({"date", "time"} & keys)
-                or new_status not in PUBLIC_RESCHEDULE_STATUSES
-            ):
-                return staff_required_response("modify this booking")
-            if str(booking.status).lower() == "awaiting payment":
-                return Response(
-                    {"error": "This booking isn't paid yet. Finish paying first, or start a new booking."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if not booking.counts_toward_capacity or booking.status in ("Checked In", "Completed"):
-                return Response(
-                    {"error": "This appointment can no longer be rescheduled online. Please contact reception."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            new_doctor_ref = request.data.get("doctor_id") or request.data.get("doctorId")
-            if ({"doctor_id", "doctorId"} & keys):
-                switch_error = public_doctor_switch_error(booking, new_doctor_ref)
-                if switch_error:
-                    return Response({"error": switch_error}, status=status.HTTP_400_BAD_REQUEST)
+            problem = public_reschedule_problem(booking, request.data)
+            if problem is not None:
+                return problem
+            # Rescheduling online carries a service charge paid with Paystack
+            # (POST /api/payments/reschedule/start/); only free when the clinic has no fee.
+            from .reschedule_pay import quote
+            q = quote(booking, request.data.get("doctor_id") or request.data.get("doctorId"))
+            moving = (str(request.data.get("date") or booking.date) != str(booking.date)
+                      or str(request.data.get("time") or booking.time).strip() != str(booking.time or "").strip()
+                      or str(request.data.get("doctor_id") or request.data.get("doctorId") or booking.doctor_id).lower() != str(booking.doctor_id).lower())
+            if moving and q["amount"] > 0:
+                return Response({
+                    "error": f"Rescheduling has a {q['percent']}% service charge (NGN {q['amount']:,.0f}), paid online with Paystack.",
+                    "reschedule_payment_required": True, "amount": float(q["amount"]), "percent": q["percent"],
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
             return self._save_with_serializer(request, booking, partial=True)
 
         # Desk staff may only change the lifecycle status; editing booking
@@ -1608,6 +1636,29 @@ class BookingViewSet(viewsets.ModelViewSet):
             # Masked: the full reference alone allows rescheduling.
             "refCode": mask_ref(existing.ref_code),
             "message": duplicate_message(existing, existing.clinic_label),
+        })
+
+    @action(detail=False, methods=["get"], url_path="follow-up-check", permission_classes=[AllowAny])
+    def follow_up_check(self, request):
+        """
+        Can this patient book a follow-up in this doctor's clinic?
+        ?doctor_id=&patient_name=&patient_phone=&hospital_card_number=&date=
+        Returns {"locked": bool, "window_days": 30}. Only says whether a
+        follow-up is allowed, never when or where the patient was seen.
+        """
+        from .duplicates import FOLLOW_UP_WINDOW_DAYS, follow_up_locked
+
+        q = request.query_params
+        doctor = _find_doctor(q.get("doctor_id"))
+        if doctor is None:
+            return Response({"locked": False, "window_days": FOLLOW_UP_WINDOW_DAYS})
+        locked, _ = follow_up_locked(doctor, q.get("patient_name", ""), q.get("patient_phone", ""),
+                                     q.get("hospital_card_number", ""), appointment_date=parse_date(q.get("date")) if q.get("date") else None)
+        return Response({
+            "locked": bool(locked),
+            "window_days": FOLLOW_UP_WINDOW_DAYS,
+            "message": (f"Your last appointment in this clinic was more than {FOLLOW_UP_WINDOW_DAYS} days ago, "
+                        "so this booking is a first visit.") if locked else "",
         })
 
     @action(detail=False, methods=["get"], url_path="public-lookup", permission_classes=[AllowAny])
