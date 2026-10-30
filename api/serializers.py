@@ -552,6 +552,10 @@ class BookingSerializer(serializers.ModelSerializer):
             # Online payment details are only ever set by the server.
             "fee_amount", "payment_reference", "payment_expires_at", "amount_paid", "paid_at",
             "first_visit_fee",
+            # Cashdesk referral (follow-up balance): only set through its own actions.
+            "cashdesk_referral_status", "cashdesk_referral_note", "cashdesk_referred_by", "cashdesk_referred_at",
+            "cashdesk_settle_note", "cashdesk_settled_by", "cashdesk_settled_at", "balance_collected", "balance_method",
+            "arrived_at", "arrived_by",
         ]
         # Derived from the selected doctor in validate().
         extra_kwargs = {
@@ -680,6 +684,17 @@ class BookingSerializer(serializers.ModelSerializer):
         ret["paidAt"] = instance.paid_at.isoformat() if instance.paid_at else None
         ret["paymentReference"] = instance.payment_reference
         ret["paymentExpiresAt"] = instance.payment_expires_at.isoformat() if instance.payment_expires_at else None
+        ret["cashdeskReferralStatus"] = instance.cashdesk_referral_status or ""
+        ret["cashdeskReferralNote"] = instance.cashdesk_referral_note or ""
+        ret["cashdeskReferredBy"] = instance.cashdesk_referred_by or ""
+        ret["cashdeskReferredAt"] = instance.cashdesk_referred_at.isoformat() if instance.cashdesk_referred_at else None
+        ret["cashdeskSettleNote"] = instance.cashdesk_settle_note or ""
+        ret["cashdeskSettledBy"] = instance.cashdesk_settled_by or ""
+        ret["cashdeskSettledAt"] = instance.cashdesk_settled_at.isoformat() if instance.cashdesk_settled_at else None
+        ret["balanceCollected"] = float(instance.balance_collected) if instance.balance_collected is not None else None
+        ret["balanceMethod"] = instance.balance_method or ""
+        ret["arrivedAt"] = instance.arrived_at.isoformat() if instance.arrived_at else None
+        ret["arrivedBy"] = instance.arrived_by or ""
         ret["hospitalCardNumber"] = instance.hospital_card_number or ""
         ret["bookedForOther"] = bool(instance.booked_for_other)
         ret["bookerName"] = instance.booker_name or ""

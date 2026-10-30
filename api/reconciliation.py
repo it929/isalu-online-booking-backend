@@ -58,17 +58,35 @@ def _admin(user):
 
 
 def permissions_for(user):
+    """
+    - Helpdesk (and other front-desk roles): check a payment's status only;
+      no money figures, refunds, daily reconciliation, ledger or activity.
+    - Cashdesk: also confirm payments, record refunds, see the money.
+    - Finance (and Booking Payments): every financial feature.
+    """
     admin = _admin(user)
-    money = admin or _has(user, "cashdesk") or _has(user, "booking_payments")
-    finance = admin or _has(user, "booking_payments")
+    finance = admin or _has(user, "finance") or _has(user, "booking_payments")
+    money = finance or _has(user, "cashdesk")
     return {
         "check": admin or _has(user, "payment_reconciliation"),
+        "view_money": money,
         "confirm": money,
         "record_refund": money,
         "paystack_refund": finance,
-        "create_refund": admin,
-        "run_check": admin or finance,
+        "create_refund": finance,
+        "run_check": finance,
     }
+
+
+def _strip_money(result):
+    """Status-only view of a check result, for roles without financial access."""
+    tx = result.get("paystack")
+    if tx:
+        result["paystack"] = {k: tx.get(k) for k in ("reference", "status", "channel", "paid_at", "created_at", "booking_ref", "amount", "currency")}
+    for k in ("refunds", "events", "attempts", "suggestions"):
+        result[k] = []
+    result["claimed"] = None
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +437,7 @@ def _result(reference, tx, booking, how, user=None):
     refunds = Refund.objects.filter(reference__in=refs).order_by("-created_at")
     events = PaymentEvent.objects.filter(Q(reference__in=refs) | (Q(ref_code=booking.ref_code) if booking else Q(pk__in=[])))
     attempts = PaymentAttempt.objects.filter(booking_ref=booking.ref_code) if booking else PaymentAttempt.objects.none()
-    return {
+    result = {
         "query": reference,
         "reference": (tx or {}).get("reference") or reference,
         "matched_by": how,
@@ -439,6 +457,9 @@ def _result(reference, tx, booking, how, user=None):
         "permissions": perms,
         "checked_at": timezone.localtime().isoformat(),
     }
+    if user is not None and not perms.get("view_money"):
+        result = _strip_money(result)
+    return result
 
 
 def _log(result, user, action, note=""):
@@ -589,10 +610,23 @@ def overview(user=None):
     attention = (len(flagged) + open_refunds.filter(status__in=[Refund.STATUS_DUE, Refund.STATUS_FAILED]).count()
                  + sum(1 for a in alerts if a["kind"] in ("unmatched_payment", "cleared_without_payment")))
 
+    perms = permissions_for(user) if user is not None else {}
+    if user is not None and not perms.get("view_money"):
+        # Front desk: which patients' online payments are unsettled, nothing financial.
+        return {
+            "online_payments_enabled": payments.paystack_enabled(),
+            "mode": ops.paystack_mode(),
+            "permissions": perms,
+            "unresolved_days": UNRESOLVED_DAYS,
+            "attention_count": len(flagged),
+            "unresolved": unresolved,
+            "flagged": flagged,
+            "alerts": [], "refunds": [], "refunds_owed": 0, "events": [], "checks": [], "sweep": None,
+        }
     return {
         "online_payments_enabled": payments.paystack_enabled(),
         "mode": ops.paystack_mode(),
-        "permissions": permissions_for(user) if user is not None else {},
+        "permissions": perms,
         "unresolved_days": UNRESOLVED_DAYS,
         "attention_count": attention,
         "unresolved": unresolved,

@@ -296,11 +296,12 @@ def _reconcile_access(request, need="check"):
                         status=status.HTTP_403_FORBIDDEN)
     if not perms.get(need):
         messages = {
-            "confirm": "Only Cashdesk, Booking Payments and administrators can confirm bookings from a payment.",
-            "record_refund": "Only Cashdesk, Booking Payments and administrators can record refunds.",
-            "paystack_refund": "Only Booking Payments staff and administrators can send refunds through Paystack.",
-            "create_refund": "Only administrators can open a new refund by hand.",
-            "run_check": "Only Booking Payments staff and administrators can run the automatic check now.",
+            "confirm": "Only Finance, Cashdesk, Booking Payments and administrators can confirm bookings from a payment.",
+            "record_refund": "Only Finance, Cashdesk, Booking Payments and administrators can record refunds.",
+            "paystack_refund": "Only Finance, Booking Payments staff and administrators can send refunds through Paystack.",
+            "create_refund": "Only Finance and administrators can open a new refund by hand.",
+            "run_check": "Only Finance, Booking Payments staff and administrators can run the automatic check now.",
+            "view_money": "Daily reconciliation, the money ledger and refunds are for Finance and the Cashdesk.",
         }
         return Response({"error": messages.get(need, "You can't do that.")}, status=status.HTTP_403_FORBIDDEN)
     return None
@@ -408,7 +409,7 @@ class ReconcileDailyView(APIView):
 
         from . import payment_ops
 
-        denied = _reconcile_access(request)
+        denied = _reconcile_access(request, "view_money")
         if denied:
             return denied
         raw = request.query_params.get("date")
@@ -433,7 +434,7 @@ class ReconcileLedgerView(APIView):
         from . import reconciliation
         from .payment_report import ReportError, parse_range
 
-        denied = _reconcile_access(request)
+        denied = _reconcile_access(request, "view_money")
         if denied:
             return denied
         try:

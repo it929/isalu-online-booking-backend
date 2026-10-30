@@ -1,9 +1,10 @@
 """
 Paid rescheduling.
 
-Patients who reschedule online (Private, HMO and Company alike) pay a
-service charge of RESCHEDULE_FEE_PERCENT (default 25%) of the clinic's fee for
-their visit type, online with Paystack, before the booking moves.
+Private Self-Pay patients who reschedule online pay a service charge of
+RESCHEDULE_FEE_PERCENT (default 25%) of the clinic's fee for their visit type,
+online with Paystack, before the booking moves. HMO and Company patients
+reschedule free of charge.
 
 1. quote()  - what the charge is for this booking (and doctor, if switching).
 2. start()  - checks the new date exactly as a free reschedule would, records
@@ -50,8 +51,16 @@ def _doctor(booking, doctor_id=None):
     return Doctor.objects.select_related("department").filter(doc_id__iexact=key).first() if key else None
 
 
+def is_sponsored(booking):
+    pt = str(getattr(booking, "payment_type", "") or "").strip().lower()
+    return "hmo" in pt or "insurance" in pt or "company" in pt
+
+
 def quote(booking, doctor_id=None):
-    """{"base_fee", "percent", "amount"} in naira (amount rounded to the naira)."""
+    """{"base_fee", "percent", "amount"} in naira (amount rounded to the naira).
+    HMO and Company bookings are not charged (amount 0)."""
+    if is_sponsored(booking):
+        return {"base_fee": Decimal("0.00"), "percent": 0, "amount": Decimal("0.00")}
     doctor = _doctor(booking, doctor_id)
     base = Decimal(payments.clinic_fee(doctor, booking.visit_type) if doctor else 0)
     pct = fee_percent()

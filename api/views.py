@@ -244,7 +244,17 @@ ALL_DESKS = [
     "checked_in_patients", "hmo_enrollees", "private_patients",
     "create_specialist_schedule", "clinic", "disabled_bookings", "hmo_declined",
     "booking_payments", "companies", "cleared_patients", "payment_reconciliation",
+    "finance",
 ]
+
+# The Finance module: every financial and HMO/company feature.
+FINANCE_DESKS = (
+    "booking_payments", "payment_reconciliation", "cashdesk", "private_patients", "cleared_patients",
+    "hmo", "hmo_enrollees", "hmo_declined", "companies",
+)
+# Finance can view these but not work them (unless the role also has them itself).
+FINANCE_VIEW_ONLY_DESKS = ("cashdesk", "hmo", "hmo_declined", "hmo_enrollees", "companies")
+FINANCE_ROLE_KEYWORDS = ("finance", "accountant", "accounts officer", "account officer", "auditor")
 
 # Staff working any private (self-pay) module can check online payments.
 PRIVATE_PAYMENT_DESKS = ("helpdesk", "cashdesk", "private_patients", "booking_payments", "cleared_patients")
@@ -295,15 +305,22 @@ def build_staff_profile(user):
         role_name = "Super Administrator" if user.is_superuser else "Helpdesk Officer"
         desk = "analytics" if user.is_superuser else "helpdesk"
         allowed = [] if user.is_superuser else ["helpdesk", "all_patients", "checked_in_patients"]
+    read_only = []
     if admin:
         allowed = list(ALL_DESKS)
     else:
+        name_l = str(role_name or "").strip().lower()
+        if role and role.status and "finance" not in allowed and any(k in name_l for k in FINANCE_ROLE_KEYWORDS):
+            allowed.append("finance")
+        if "finance" in allowed:
+            for d in FINANCE_DESKS:
+                if d not in allowed:
+                    allowed.append(d)
+                    if d in FINANCE_VIEW_ONLY_DESKS:
+                        read_only.append(d)
         if "hmo" in allowed and "hmo_declined" not in allowed:
             # Whoever works the HMO desk also handles the requests it declined.
             allowed.append("hmo_declined")
-        if "monitor" in allowed and "all_patients" not in allowed:
-            # Monitor operators look patients up in the All Patients Directory.
-            allowed.append("all_patients")
         if "payment_reconciliation" not in allowed and any(d in allowed for d in PRIVATE_PAYMENT_DESKS):
             # Helpdesk, Cashdesk and the other private-patient modules confirm online payments.
             allowed.append("payment_reconciliation")
@@ -316,7 +333,50 @@ def build_staff_profile(user):
         "desk": desk,
         "isAdmin": admin,
         "allowedDesks": allowed,
+        # Modules this user may view but not act in (Finance sees the Cashdesk without its buttons).
+        "readOnlyDesks": read_only,
     }
+
+
+# ---------------------------------------------------------------------------
+# Waiting-room Monitor staff see cleared patients only: paid online, paid at
+# the Cashdesk, or approved by the HMO desk. A role whose only booking module
+# is the Monitor never receives an uncleared patient's record from the API.
+# ---------------------------------------------------------------------------
+NOT_SEEN_STATUSES = ("cancelled", "canceled", "disabled", "awaiting payment", "payment expired")
+
+
+MONITOR_VIEW_DESKS = {"monitor", "all_patients", "checked_in_patients", "cleared_patients"}
+
+
+def is_monitor_only(user):
+    if not user or not getattr(user, "is_authenticated", False) or is_admin_user(user):
+        return False
+    allowed = set(build_staff_profile(user)["allowedDesks"])
+    # A Monitor operator whose other desks are only patient lists (the
+    # older seeded role also had "all_patients") still sees cleared patients only.
+    return "monitor" in allowed and not (allowed - MONITOR_VIEW_DESKS)
+
+
+def is_cleared_booking(b):
+    if not getattr(b, "is_active", True) or str(getattr(b, "status", "") or "").strip().lower() in NOT_SEEN_STATUSES:
+        return False
+    pay = str(getattr(b, "payment_status", "") or "").strip().lower()
+    if is_sponsored_booking(b):
+        hmo = str(getattr(b, "hmo_status", "") or "").strip().lower()
+        return hmo != "declined" and (hmo == "approved" or pay == "cleared")
+    return pay in ("cleared", "paid", "settled")
+
+
+def cleared_bookings_q():
+    """The same rule as is_cleared_booking, as a database filter."""
+    sponsored = Q(payment_type="HMO Insurance") | Q(payment_type__icontains="company")
+    live = Q(is_active=True)
+    for s in NOT_SEEN_STATUSES:
+        live &= ~Q(status__iexact=s)
+    private_paid = ~sponsored & (Q(payment_status__iexact="cleared") | Q(payment_status__iexact="paid") | Q(payment_status__iexact="settled"))
+    sponsored_ok = sponsored & ~Q(hmo_status__iexact="declined") & (Q(hmo_status__iexact="approved") | Q(payment_status__iexact="cleared"))
+    return live & (private_paid | sponsored_ok)
 
 
 def admin_required_response(action_text="perform this action"):
@@ -349,6 +409,25 @@ class StaffReadAdminWrite(BasePermission):
         if request.method in SAFE_METHODS:
             return True
         return is_admin_user(request.user)
+
+
+def can_work_desk(user, desk):
+    """False when the user may only view this module (Finance on the Cashdesk and HMO desks)."""
+    if is_admin_user(user):
+        return True
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    return desk not in build_staff_profile(user).get("readOnlyDesks", [])
+
+
+def can_work_cashdesk(user):
+    """Clearing payments and settling referrals: not for view-only (Finance) access."""
+    return can_work_desk(user, "cashdesk")
+
+
+def view_only_response(what):
+    return Response({"error": f"Finance can view this module but can't {what}. That is done at the desk itself."},
+                    status=status.HTTP_403_FORBIDDEN)
 
 
 def user_has_desk(user, desk):
@@ -1302,6 +1381,9 @@ class BookingViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         if not is_staff_request(request):
             return staff_required_response("view the patient booking registry")
+        if is_monitor_only(request.user):
+            qs = self.filter_queryset(self.get_queryset()).filter(cleared_bookings_q())
+            return Response(self.get_serializer(qs, many=True).data)
 
         include_disabled = request.query_params.get("include_disabled") == "true"
         limit_param = request.query_params.get("limit", "")
@@ -1353,6 +1435,9 @@ class BookingViewSet(viewsets.ModelViewSet):
             ).defer("referral_doc_data", "referral_doc_text")
             active = [b for b in changed if b.is_active and str(b.status).lower() != "disabled"]
             removed = [b.ref_code for b in changed if not (b.is_active and str(b.status).lower() != "disabled")]
+            if is_monitor_only(request.user):
+                removed += [b.ref_code for b in active if not is_cleared_booking(b)]
+                active = [b for b in active if is_cleared_booking(b)]
             return Response({
                 "server_time": server_time.isoformat(),
                 "full": False,
@@ -1361,6 +1446,8 @@ class BookingViewSet(viewsets.ModelViewSet):
             })
 
         qs = Booking.objects.filter(live).defer("referral_doc_data", "referral_doc_text").order_by("-created_at")
+        if is_monitor_only(request.user):
+            qs = qs.filter(cleared_bookings_q())
         date_from = parse_date(request.query_params.get("date_from"))
         if date_from:
             qs = qs.filter(date__gte=date_from.isoformat())
@@ -1375,6 +1462,8 @@ class BookingViewSet(viewsets.ModelViewSet):
     def retrieve(self, request, *args, **kwargs):
         if not is_staff_request(request):
             return staff_required_response("open booking records")
+        if is_monitor_only(request.user) and not is_cleared_booking(self.get_object()):
+            return Response({"error": "The Monitor only shows patients who have been cleared."}, status=status.HTTP_404_NOT_FOUND)
         return super().retrieve(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
@@ -1410,6 +1499,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         if (
             str(new_status or "").strip() == "Completed"
             and str(booking.payment_status).strip().lower() == "pending"
+            # An HMO/Company patient approved at the HMO desk is cleared even if
+            # the payment field still says "Pending".
+            and not is_cleared_booking(booking)
         ):
             return Response(
                 {
@@ -1455,6 +1547,9 @@ class BookingViewSet(viewsets.ModelViewSet):
                     "reschedule_payment_required": True, "amount": float(q["amount"]), "percent": q["percent"],
                 }, status=status.HTTP_402_PAYMENT_REQUIRED)
             return self._save_with_serializer(request, booking, partial=True)
+
+        if is_monitor_only(request.user) and not is_cleared_booking(booking):
+            return Response({"error": "The Monitor can only update patients who have been cleared."}, status=status.HTTP_403_FORBIDDEN)
 
         # Desk staff may only change the lifecycle status; editing booking
         # details (patient, date, time, payment fields) is admin-only.
@@ -1679,6 +1774,88 @@ class BookingViewSet(viewsets.ModelViewSet):
             "message": duplicate_message(existing, existing.clinic_label),
         })
 
+    def _staff_name(self, request):
+        u = request.user
+        return (u.get_full_name() or u.first_name or u.username) if u and u.is_authenticated else ""
+
+    @action(detail=True, methods=["post"], url_path="pass-to-cashdesk")
+    def pass_to_cashdesk(self, request, ref_code=None):
+        """
+        A follow-up patient is sent to the Cashdesk in case they owe the balance
+        up to the first-visit fee. {"note": "..."} (Helpdesk, Monitor, Cashdesk, admins).
+        """
+        if not is_staff_request(request):
+            return staff_required_response("send patients to the Cashdesk")
+        if not any(user_has_desk(request.user, d) for d in ("helpdesk", "monitor", "cashdesk")):
+            return Response({"error": "Your role can't send patients to the Cashdesk."}, status=status.HTTP_403_FORBIDDEN)
+        booking = self.get_object()
+        if is_monitor_only(request.user) and not is_cleared_booking(booking):
+            return Response({"error": "The Monitor can only update patients who have been cleared."}, status=status.HTTP_403_FORBIDDEN)
+        if str(booking.visit_type or "") != "Follow-up":
+            return Response({"error": "Only follow-up bookings are sent to the Cashdesk for a balance check."}, status=status.HTTP_400_BAD_REQUEST)
+        if not booking.is_active or str(booking.status).lower() in NOT_SEEN_STATUSES:
+            return Response({"error": "This booking is cancelled or not active."}, status=status.HTTP_400_BAD_REQUEST)
+        note = " ".join(str(request.data.get("note") or "").split())[:500]
+        booking.cashdesk_referral_status = "pending"
+        booking.cashdesk_referral_note = note
+        booking.cashdesk_referred_by = self._staff_name(request)[:200]
+        booking.cashdesk_referred_at = timezone.now()
+        booking.cashdesk_settle_note = ""
+        booking.cashdesk_settled_by = ""
+        booking.cashdesk_settled_at = None
+        booking.save(update_fields=["cashdesk_referral_status", "cashdesk_referral_note", "cashdesk_referred_by",
+                                    "cashdesk_referred_at", "cashdesk_settle_note", "cashdesk_settled_by", "cashdesk_settled_at"])
+        broadcast_booking_update(booking, event_type="BOOKING_UPDATED",
+                                 message=f"{booking.patient_name} ({booking.ref_code}) sent to the Cashdesk: follow-up balance check.")
+        return Response(BookingSerializer(booking).data)
+
+    @action(detail=True, methods=["post"], url_path="cashdesk-referral")
+    def cashdesk_referral(self, request, ref_code=None):
+        """
+        The Cashdesk settles a follow-up referral:
+        {"outcome": "paid", "amount": 10000, "method": "cash"|"pos_transfer", "note"} or
+        {"outcome": "not_needed", "note"} (it was a genuine follow-up).
+        """
+        if not is_staff_request(request):
+            return staff_required_response("update Cashdesk referrals")
+        if not user_has_desk(request.user, "cashdesk") or not can_work_cashdesk(request.user):
+            return Response({"error": "Only the Cashdesk can settle a balance referral."}, status=status.HTTP_403_FORBIDDEN)
+        booking = self.get_object()
+        if booking.cashdesk_referral_status != "pending":
+            return Response({"error": "This patient isn't waiting at the Cashdesk for a balance check."}, status=status.HTTP_400_BAD_REQUEST)
+        outcome = str(request.data.get("outcome") or "")
+        note = " ".join(str(request.data.get("note") or "").split())[:500]
+        who = self._staff_name(request)[:200]
+        if outcome == "paid":
+            from decimal import Decimal, InvalidOperation
+            try:
+                amount = Decimal(str(request.data.get("amount"))).quantize(Decimal("0.01"))
+            except (InvalidOperation, TypeError, ValueError):
+                return Response({"error": "Enter the balance collected, in naira."}, status=status.HTTP_400_BAD_REQUEST)
+            if amount <= 0 or amount > Decimal("10000000"):
+                return Response({"error": "Enter the balance collected, in naira."}, status=status.HTTP_400_BAD_REQUEST)
+            method = {"cash": "Cash", "pos_transfer": "POS/Transfer"}.get(str(request.data.get("method") or ""), "")
+            if not method:
+                return Response({"error": "Choose how the balance was paid: cash or POS/transfer."}, status=status.HTTP_400_BAD_REQUEST)
+            booking.balance_collected = amount
+            booking.balance_method = method
+            booking.cashdesk_referral_status = "paid"
+            from .payment_ledger import record
+            record("balance_collected", reference=booking.invoice_ref or booking.ref_code, booking=booking, amount=amount,
+                   source="staff", actor=who, note=f"Follow-up balance paid by {method}" + (f": {note}" if note else ""))
+        elif outcome == "not_needed":
+            booking.cashdesk_referral_status = "not_needed"
+        else:
+            return Response({"error": "Choose whether the balance was paid or not needed."}, status=status.HTTP_400_BAD_REQUEST)
+        booking.cashdesk_settle_note = note
+        booking.cashdesk_settled_by = who
+        booking.cashdesk_settled_at = timezone.now()
+        booking.save(update_fields=["cashdesk_referral_status", "cashdesk_settle_note", "cashdesk_settled_by", "cashdesk_settled_at",
+                                    "balance_collected", "balance_method"])
+        broadcast_booking_update(booking, event_type="BOOKING_UPDATED",
+                                 message=f"Cashdesk: follow-up balance for {booking.ref_code} " + ("paid." if outcome == "paid" else "not needed."))
+        return Response(BookingSerializer(booking).data)
+
     @action(detail=False, methods=["get"], url_path="follow-up-check", permission_classes=[AllowAny])
     def follow_up_check(self, request):
         """
@@ -1813,6 +1990,8 @@ class BookingViewSet(viewsets.ModelViewSet):
     def reroute_cashdesk(self, request, ref_code=None):
         if not is_staff_request(request):
             return staff_required_response("reroute bookings")
+        if not can_work_desk(request.user, "hmo"):
+            return view_only_response("reroute patients")
 
         booking = Booking.objects.filter(ref_code=ref_code).first()
         if not booking:
@@ -1820,6 +1999,11 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {"error": f"Booking ticket {ref_code} not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        if not is_sponsored_booking(booking):
+            return Response({"error": "Only HMO or company patients can be rerouted to the Cashdesk."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if is_monitor_only(request.user) and not is_cleared_booking(booking):
+            return Response({"error": f"Booking ticket {ref_code} not found."}, status=status.HTTP_404_NOT_FOUND)
 
         remark = (
             request.data.get("remark")
@@ -1833,8 +2017,12 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.hmo_status = f"Re-routed to Cashdesk (Self-Pay): {remark}"
         booking.payment_status = "Pending"
         booking.delete_reason = f"Re-routed from HMO to Cashdesk: {remark}"
+        booking.cashdesk_referral_note = str(remark)[:500]
+        booking.cashdesk_referred_by = self._staff_name(request)
+        booking.cashdesk_referred_at = timezone.now()
         booking.save(update_fields=[
             "payment_type", "hmo_name", "hmo_status", "payment_status", "delete_reason",
+            "cashdesk_referral_note", "cashdesk_referred_by", "cashdesk_referred_at",
         ])
 
         broadcast_booking_update(
@@ -1846,12 +2034,41 @@ class BookingViewSet(viewsets.ModelViewSet):
             "data": BookingSerializer(booking).data,
         })
 
+    @action(detail=True, methods=["post"], url_path="mark-arrived")
+    def mark_arrived(self, request, ref_code=None):
+        """Helpdesk: record that the patient is present at today's clinic.
+        Works whether or not they've paid; only cleared patients join the
+        doctor's queue (that is check-in)."""
+        if not is_staff_request(request):
+            return staff_required_response("record patient arrival")
+        if is_monitor_only(request.user):
+            return Response({"error": "Arrival is recorded at the Helpdesk."}, status=status.HTTP_403_FORBIDDEN)
+        booking = self.get_object()
+        if not booking.is_active or str(booking.status or "").strip().lower() in NOT_SEEN_STATUSES:
+            return Response({"error": "This booking is cancelled or not active."}, status=status.HTTP_400_BAD_REQUEST)
+        if str(booking.date or "")[:10] != timezone.localdate().isoformat():
+            return Response({"error": f"Ticket {booking.ref_code} is booked for {booking.date}. Arrival is recorded for today's clinic only."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not booking.arrived_at:
+            booking.arrived_at = timezone.now()
+            booking.arrived_by = self._staff_name(request)
+            booking.save(update_fields=["arrived_at", "arrived_by"])
+            broadcast_booking_update(booking, event_type="PATIENT_ARRIVED",
+                                     message=f"Patient {booking.patient_name} ({booking.ref_code}) is at the clinic.")
+        return Response({"message": f"{booking.patient_name} marked present.", "data": BookingSerializer(booking).data})
+
     @action(detail=True, methods=["post"], url_path="check-in")
     def check_in(self, request, ref_code=None):
         if not is_staff_request(request):
             return staff_required_response("check patients in")
 
         booking = self.get_object()
+        today = timezone.localdate().isoformat()
+        if str(booking.date or "")[:10] != today:
+            return Response(
+                {"error": f"Ticket {booking.ref_code} is booked for {booking.date}. Patients can only be checked in for today's clinic."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if is_sponsored_booking(booking) and booking.hmo_status != "Approved":
             return Response(
                 {
@@ -1868,19 +2085,24 @@ class BookingViewSet(viewsets.ModelViewSet):
                 {"error": f"Ticket {booking.ref_code} was not paid online. Ask the patient to book again or pay at the cashdesk."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if booking.payment_status == "Pending":
+        if not is_cleared_booking(booking):
             return Response(
                 {
                     "error": (
                         f"Payment Clearance Required: Cannot check in ticket {booking.ref_code} "
-                        "while payment is Pending. Route patient to Cashdesk first."
+                        f"while payment is {booking.payment_status or 'Pending'}. Route patient to Cashdesk first."
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         booking.status = "Checked In"
-        booking.save(update_fields=["status"])
+        fields = ["status"]
+        if not booking.arrived_at:
+            booking.arrived_at = timezone.now()
+            booking.arrived_by = self._staff_name(request)
+            fields += ["arrived_at", "arrived_by"]
+        booking.save(update_fields=fields)
         broadcast_booking_update(
             booking, event_type="PATIENT_CHECKED_IN",
             message=f"Patient {booking.patient_name} ({booking.ref_code}) checked in.",
@@ -1894,6 +2116,8 @@ class BookingViewSet(viewsets.ModelViewSet):
     def approve_hmo(self, request, ref_code=None):
         if not is_staff_request(request):
             return staff_required_response("approve HMO authorizations")
+        if not can_work_desk(request.user, "hmo"):
+            return view_only_response("approve HMO requests")
 
         booking = self.get_object()
         policy = (
@@ -1937,6 +2161,8 @@ class BookingViewSet(viewsets.ModelViewSet):
         """HMO desk refuses pre-authorization: the booking moves to Declined HMO Approvals."""
         if not is_staff_request(request):
             return staff_required_response("decline HMO authorizations")
+        if not can_work_desk(request.user, "hmo"):
+            return view_only_response("decline HMO requests")
 
         booking = self.get_object()
         if not is_sponsored_booking(booking):
@@ -1980,6 +2206,8 @@ class BookingViewSet(viewsets.ModelViewSet):
         """Send a declined booking back to the HMO approval queue."""
         if not is_staff_request(request):
             return staff_required_response("re-open HMO authorizations")
+        if not can_work_desk(request.user, "hmo"):
+            return view_only_response("re-open HMO requests")
 
         booking = self.get_object()
         if str(booking.hmo_status or "").strip().lower() != "declined":
@@ -2007,6 +2235,9 @@ class BookingViewSet(viewsets.ModelViewSet):
     def pay_cashdesk(self, request, ref_code=None):
         if not is_staff_request(request):
             return staff_required_response("clear payments")
+        if not can_work_cashdesk(request.user):
+            return Response({"error": "Finance can view the Cashdesk but payments are cleared by the Cashdesk."},
+                            status=status.HTTP_403_FORBIDDEN)
 
         booking = self.get_object()
         if str(booking.payment_status).lower() == "cleared":
@@ -2049,6 +2280,8 @@ class HmoCompanyViewSet(viewsets.ModelViewSet):
     lookup_field = "hmo_id"
 
     def create(self, request, *args, **kwargs):
+        if not can_work_desk(request.user, "hmo_enrollees"):
+            return view_only_response("add HMO providers")
         hmo_id = (
             request.data.get("hmo_id")
             or request.data.get("id")

@@ -106,6 +106,8 @@ def run_e2e_tests():
     print(f'[TEST 5 PASS] Cashdesk Billing Payment: Payment Status = {res_pay.data.get("paymentStatus")}')
 
     # TEST 6: Reception Check-in Action
+    from api.models import Booking as _B; from django.utils import timezone as _tz
+    _B.objects.filter(ref_code=created_ref).update(date=_tz.localdate().isoformat())   # check-in is for today's clinic only
     res_checkin = client.post(f'/api/bookings/{created_ref}/check-in/')
     assert res_checkin.status_code == 200, f"Check-in failed: {res_checkin.status_code}"
     print(f'[TEST 6 PASS] Reception Patient Check-in: Status = {res_checkin.data.get("status")}')
@@ -497,7 +499,12 @@ def run_permission_tests(client, today_str):
 
     assert staff.patch(f'/api/bookings/{ref}/', {'status': 'Confirmed'}, format='json').status_code == 200
     assert staff.post(f'/api/bookings/{ref}/pay-cashdesk/', {'paymentMethod': 'cash'}, format='json').status_code == 200
+    from django.utils import timezone as _tz
+    _future = Booking.objects.get(ref_code=ref).date
+    assert staff.post(f'/api/bookings/{ref}/check-in/').status_code == 400       # not today's clinic
+    Booking.objects.filter(ref_code=ref).update(date=_tz.localdate().isoformat())
     assert staff.post(f'/api/bookings/{ref}/check-in/').status_code == 200
+    Booking.objects.filter(ref_code=ref).update(date=_future)
     assert staff.get('/api/bookings/').status_code == 200
     assert staff.get(f'/api/schedule-exceptions/preview/?doctor_id=doc-1&date={avail[1]["date"]}').status_code == 200
     assert client.delete(f'/api/bookings/{ref}/').status_code == 200          # admin still can
@@ -777,7 +784,7 @@ def run_disabled_hidden_tests(client, today_str):
 
 
 def run_monitor_module_tests(client, today_str):
-    """R37: monitor operators also get the All Patients Directory module."""
+    """R37: monitor operators get the Monitor only, and see cleared patients only."""
     from django.contrib.auth.models import User as _User
     from api.models import Role as _Role, UserProfile as _Profile
     role = _Role.objects.filter(primary_desk='monitor').first()
@@ -788,10 +795,10 @@ def run_monitor_module_tests(client, today_str):
     r = APIClient().post('/api/auth/staff-login/', {'username': 'monitor.e2e@isaluhospitals.com', 'password': 'admin123'}, format='json')
     assert r.status_code == 200, r.data
     desks = r.data['user']['allowedDesks']
-    assert 'monitor' in desks and 'all_patients' in desks, desks
+    assert 'monitor' in desks and 'all_patients' not in desks, desks
     c = APIClient(); c.credentials(HTTP_AUTHORIZATION=f"Bearer {r.data['tokens']['access']}")
     assert c.get('/api/bookings/sync/').status_code == 200
-    print('[R37 PASS] Monitor operators get the All Patients Directory module (even on older role records).')
+    print('[R37 PASS] Monitor operators get the Monitor desk only (cleared patients only).')
 
 
 if __name__ == '__main__':

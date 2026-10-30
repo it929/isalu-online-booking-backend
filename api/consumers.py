@@ -14,6 +14,11 @@ class MedicalBookingConsumer(AsyncWebsocketConsumer):
             return
 
 
+        # Monitor-only staff never receive an uncleared patient's details.
+        from channels.db import database_sync_to_async
+        from .views import is_monitor_only
+        self.monitor_only = await database_sync_to_async(is_monitor_only)(self.user)
+
         # Join the hospital staff real-time feed
         await self.channel_layer.group_add("hospital_feed", self.channel_name)
 
@@ -33,9 +38,24 @@ class MedicalBookingConsumer(AsyncWebsocketConsumer):
         if payload.get("action") == "ping":
             await self.send(text_data=json.dumps({"type": "pong"}))
 
+    @staticmethod
+    def _looks_cleared(p):
+        status = str(p.get("status") or "").strip().lower()
+        if p.get("is_active") is False or status in ("cancelled", "canceled", "disabled", "awaiting payment", "payment expired"):
+            return False
+        pay = str(p.get("payment_status") or "").strip().lower()
+        hmo = str(p.get("hmo_status") or "").strip().lower()
+        return hmo != "declined" and (pay in ("cleared", "paid", "settled") or hmo == "approved")
+
     async def booking_update(self, event):
         """Dispatches real-time broadcast payload to WebSocket client."""
+        payload = event["payload"]
+        if getattr(self, "monitor_only", False) and not self._looks_cleared(payload):
+            # Just "something changed" so the screen refreshes; the record itself
+            # comes from the (filtered) sync endpoint.
+            payload = {"event_type": "BOOKING_UPDATE", "message": "Booking updated.",
+                       "timestamp": payload.get("timestamp"), "redacted": True}
         await self.send(text_data=json.dumps({
             "type": "BOOKING_UPDATE",
-            "data": event["payload"]
+            "data": payload
         }))

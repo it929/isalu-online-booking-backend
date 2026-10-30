@@ -6,15 +6,20 @@ Generated for Isalu Hospitals Medical Booking Platform.
 from pathlib import Path
 from datetime import timedelta
 import os
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv("SECRET_KEY", "unsafe")
+# Always read backend/.env (next to manage.py), whichever folder the server is
+# started from. Values already set in the system environment win.
+ENV_FILE = BASE_DIR / ".env"
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+    load_dotenv(ENV_FILE)
+except ImportError:
+    DOTENV_AVAILABLE = False
+
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-isalu-clinic-booking-key-2026-secure-key!')
 
 DEBUG = os.getenv('DJANGO_DEBUG', 'True').lower() in ('true', '1')
 
@@ -98,7 +103,7 @@ if redis_hosts:
         "default": {
             "BACKEND": "channels_redis.core.RedisChannelLayer",
             "CONFIG": {
-                "hosts": [os.getenv("REDIS_URL", "redis://redis:6379/0")],
+                "hosts": redis_hosts,
             },
         },
     }
@@ -125,6 +130,9 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
+        # Wait up to 20 s for another writer (background payment checks and
+        # notices write too) instead of failing with "database is locked".
+        'OPTIONS': {'timeout': int(os.getenv('SQLITE_TIMEOUT_SECONDS', '20'))},
     }
 }
 
@@ -213,7 +221,7 @@ USE_TZ = True
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = 'static/'
-STATIC_ROOT = "/var/www/isalu"
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
@@ -260,6 +268,24 @@ EBULKSMS_API_URL = os.getenv('EBULKSMS_API_URL', 'https://api.ebulksms.com/sends
 PAYSTACK_SECRET_KEY = os.getenv('PAYSTACK_SECRET_KEY', '').strip()
 PAYSTACK_PUBLIC_KEY = os.getenv('PAYSTACK_PUBLIC_KEY', '').strip()
 PAYSTACK_API_URL = os.getenv('PAYSTACK_API_URL', 'https://api.paystack.co').strip().rstrip('/')
+
+# Automatic payment check: how often (minutes) unconfirmed and recently paid
+# online payments are re-checked with Paystack. 0 switches it off (then run
+# `python manage.py reconcile_payments` from cron instead).
+PAYMENT_SWEEP_MINUTES = int(os.getenv('PAYMENT_SWEEP_MINUTES', '15') or 0)
+
+# Patients rescheduling online pay this percentage of the clinic fee (for their
+# visit type) with Paystack before the booking moves. 0 = free rescheduling.
+RESCHEDULE_FEE_PERCENT = int(os.getenv('RESCHEDULE_FEE_PERCENT', '25') or 0)
+
+# Optional: only accept Paystack webhooks from these addresses (comma separated).
+# Paystack's published addresses: 52.31.139.75, 52.49.173.169, 52.214.14.220.
+# The webhook signature is always checked whether or not this is set.
+PAYSTACK_WEBHOOK_IPS = [ip.strip() for ip in os.getenv('PAYSTACK_WEBHOOK_IPS', '').split(',') if ip.strip()]
+
+# Behind nginx or another proxy, set True so the real caller address is used
+# (webhook allowlist and the audit trail). Leave False when Django faces the internet.
+TRUST_X_FORWARDED_FOR = os.getenv('TRUST_X_FORWARDED_FOR', 'False').strip().lower() in ('1', 'true', 'yes')
 # Public address of the booking site; Paystack sends patients back to
 # <PUBLIC_SITE_URL>/book after paying. Example: https://book.isaluhospitals.com
 PUBLIC_SITE_URL = os.getenv('PUBLIC_SITE_URL', '').strip().rstrip('/')

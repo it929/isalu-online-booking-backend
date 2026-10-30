@@ -634,6 +634,21 @@ class Booking(models.Model):
     # follow-up, the patient pays the balance up to the first-visit fee
     # (first_visit_fee, recorded at booking time). The patient agrees to this
     # on the booking form (follow_up_acknowledged).
+    # Follow-up patients passed to the Cashdesk (from the Helpdesk or Monitor) in case
+    # they owe the balance up to the first-visit fee. status: "", pending, paid, not_needed.
+    cashdesk_referral_status = models.CharField(max_length=20, blank=True, default="", db_index=True)
+    cashdesk_referral_note = models.CharField(max_length=500, blank=True, default="")
+    cashdesk_referred_by = models.CharField(max_length=200, blank=True, default="")
+    cashdesk_referred_at = models.DateTimeField(null=True, blank=True)
+    cashdesk_settle_note = models.CharField(max_length=500, blank=True, default="")
+    cashdesk_settled_by = models.CharField(max_length=200, blank=True, default="")
+    cashdesk_settled_at = models.DateTimeField(null=True, blank=True)
+    balance_collected = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    balance_method = models.CharField(max_length=40, blank=True, default="")
+    # Presence at today's clinic, recorded by the Helpdesk (paid or not).
+    arrived_at = models.DateTimeField(null=True, blank=True)
+    arrived_by = models.CharField(max_length=200, blank=True, default="")
+
     # Optional hospital card number the patient typed on the booking form.
     hospital_card_number = models.CharField(max_length=30, blank=True, default="", db_index=True)
 
@@ -887,6 +902,7 @@ class PaymentEvent(models.Model):
         ("reschedule_not_applied", "Reschedule paid, new date no longer free"),
         ("payment_linked", "Payment linked to a booking by staff"),
         ("unmatched_dismissed", "Marked as not a booking payment"),
+        ("balance_collected", "Follow-up balance collected at the Cashdesk"),
     ]
 
     kind = models.CharField(max_length=40, choices=KINDS, db_index=True)
