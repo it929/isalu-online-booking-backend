@@ -1,0 +1,136 @@
+{% extends "superuser_tools/base.html" %}
+{% block content %}
+<div class="top">
+  <div>
+    <h1>Bookings tools</h1>
+    <p class="muted">Signed in as <b>{{ request.user.get_username }}</b> (superuser). Every action needs the tools password and a fresh code from your authenticator app (each code works once), is logged and is emailed to the superusers. You're signed out of this page after 15 minutes without activity.</p>
+  </div>
+  <form method="post">{% csrf_token %}<input type="hidden" name="action" value="signout"><button class="plain" type="submit">Sign out</button></form>
+</div>
+
+<div class="stats">
+  <div class="stat"><b>{{ total }}</b><span class="muted">bookings in the database</span></div>
+  <div class="stat"><b>{{ upcoming }}</b><span class="muted">upcoming (today onwards, active)</span></div>
+</div>
+
+{% if not password_set %}<div class="msg warn">No tools password is set yet. On the server run <code>python manage.py set_tools_password</code>, then reload this page.</div>{% endif %}
+{% if locked %}<div class="msg err">Too many wrong passwords. The tools are locked for 15 minutes.</div>{% endif %}
+{% if message %}<div class="msg ok" data-testid="tools-message">{{ message }}</div>{% endif %}
+{% if error %}<div class="msg err" data-testid="tools-error">{{ error }}</div>{% endif %}
+
+{% if preview %}
+<div class="card" data-testid="preview">
+  <h2>Check before importing: {{ preview.file }}</h2>
+  <p><b>{{ preview.valid }}</b> booking(s) ready to import · <b>{{ preview.error_count }}</b> row(s) with errors (not imported) · <b>{{ preview.skipped_count }}</b> skipped (reference already exists)</p>
+  {% if preview.unknown %}<p class="muted">Ignored columns: {{ preview.unknown|join:", " }}</p>{% endif %}
+  {% if preview.sample %}
+  <table><tr><th>Reference</th><th>Patient</th><th>Date</th><th>Time</th><th>Doctor</th><th>Payment type</th></tr>
+    {% for r in preview.sample %}<tr><td><code>{{ r.ref }}</code></td><td>{{ r.name }}</td><td>{{ r.date }}</td><td>{{ r.time }}</td><td>{{ r.doctor }}</td><td>{{ r.type }}</td></tr>{% endfor %}
+  </table>
+  {% if preview.valid > 10 %}<p class="muted">First 10 of {{ preview.valid }} shown.</p>{% endif %}
+  {% endif %}
+  {% if preview.errors %}
+  <details {% if not preview.valid %}open{% endif %} style="margin-top:10px"><summary><b>Rows with errors</b></summary>
+    <table><tr><th>Line</th><th>Problem</th></tr>{% for line, msg in preview.errors %}<tr><td>{{ line }}</td><td>{{ msg }}</td></tr>{% endfor %}</table>
+  </details>
+  {% endif %}
+  {% if preview.skipped %}
+  <details style="margin-top:10px"><summary><b>Skipped rows</b></summary>
+    <table><tr><th>Line</th><th>Reference</th><th>Why</th></tr>{% for line, ref, why in preview.skipped %}<tr><td>{{ line }}</td><td><code>{{ ref }}</code></td><td>{{ why }}</td></tr>{% endfor %}</table>
+  </details>
+  {% endif %}
+  {% if preview.valid %}
+  <form method="post" data-confirm="Are you sure you want to add {{ preview.valid }} booking(s) from {{ preview.file }} to the database? This can't be undone from here." data-testid="import-form">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="import">
+    <input type="hidden" name="token" value="{{ preview.token }}">
+    <input type="hidden" name="confirm" value="yes">
+    <div class="row">
+      <div><label for="ip">Tools password</label><input id="ip" type="password" name="tools_password" required autocomplete="off"></div><div style="flex:0 1 170px"><label for="ip-otp">Authenticator code</label><input id="ip-otp" type="text" name="otp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" required autocomplete="one-time-code" placeholder="123456"></div>
+      <div style="flex:0 0 auto"><button class="green" type="submit">Import {{ preview.valid }} booking(s)</button></div>
+    </div>
+    <p class="muted">Use a new code (not the one used to check the file). This preview expires in 15 minutes.</p>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Upload bookings from CSV</h2>
+  <p class="muted">CSV files only (comma separated, UTF-8), up to {{ max_mb }} MB and {{ max_rows }} rows. Required columns: <code>{{ required }}</code>. Other columns use the booking field names, the same as the downloads, so a downloaded file can be uploaded again. Rows whose reference already exists are skipped. Nothing is saved until you confirm on the next screen.</p>
+  <form method="post" enctype="multipart/form-data" data-testid="upload-form">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="preview">
+    <label for="f">CSV file</label>
+    <input id="f" type="file" name="csv_file" accept=".csv,text/csv" required>
+    <div class="row">
+      <div><label for="up">Tools password</label><input id="up" type="password" name="tools_password" required autocomplete="off"></div><div style="flex:0 1 170px"><label for="up-otp">Authenticator code</label><input id="up-otp" type="text" name="otp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" required autocomplete="one-time-code" placeholder="123456"></div>
+      <div style="flex:0 0 auto"><button type="submit">Check file</button></div>
+    </div>
+  </form>
+  <form method="post" style="margin-top:10px">{% csrf_token %}<input type="hidden" name="action" value="template">
+    <div class="row"><div><input type="password" name="tools_password" placeholder="Tools password" required autocomplete="off"></div><div style="flex:0 1 170px"><input type="text" name="otp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" required autocomplete="one-time-code" placeholder="Authenticator code"></div>
+    <div style="flex:0 0 auto"><button class="plain" type="submit">Download empty template</button></div></div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Download bookings (CSV)</h2>
+  <p class="muted">Contains patient names and phone numbers: keep the files safe and delete them when done.</p>
+  <form method="post" data-testid="download-form">
+    {% csrf_token %}
+    <div class="row">
+      <div><label for="dp">Tools password</label><input id="dp" type="password" name="tools_password" required autocomplete="off"></div><div style="flex:0 1 170px"><label for="dp-otp">Authenticator code</label><input id="dp-otp" type="text" name="otp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" required autocomplete="one-time-code" placeholder="123456"></div>
+      <div style="flex:0 0 auto"><button type="submit" name="action" value="download_all">All bookings ({{ total }})</button></div>
+      <div style="flex:0 0 auto"><button type="submit" name="action" value="download_upcoming">Upcoming bookings ({{ upcoming }})</button></div>
+    </div>
+  </form>
+</div>
+
+<div class="card danger">
+  <h2>Remove all bookings</h2>
+  <p>Deletes every booking ({{ total }}) from the database. A full backup CSV is saved on the server first, and you can download it below. Payment records, refunds and the money ledger are kept.</p>
+  <form method="post" data-confirm="Are you sure you want to remove ALL {{ total }} bookings? Every booking will be deleted from the database." data-testid="delete-form">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="delete_all">
+    <label for="ph">Type <code>{{ phrase }}</code> to confirm</label>
+    <input id="ph" type="text" name="phrase" required autocomplete="off" spellcheck="false">
+    <div class="row">
+      <div><label for="xp">Tools password</label><input id="xp" type="password" name="tools_password" required autocomplete="off"></div><div style="flex:0 1 170px"><label for="xp-otp">Authenticator code</label><input id="xp-otp" type="text" name="otp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" required autocomplete="one-time-code" placeholder="123456"></div>
+      <div style="flex:0 0 auto"><button class="red" type="submit" {% if not total %}disabled{% endif %}>Remove all bookings</button></div>
+    </div>
+  </form>
+</div>
+
+{% if backups %}
+<div class="card">
+  <h2>Backups saved before removals</h2>
+  <form method="post">{% csrf_token %}<input type="hidden" name="action" value="download_backup">
+    <div class="row">
+      <div><label for="bn">Backup</label>
+        <select id="bn" name="name" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:10px;font:inherit">{% for b in backups %}<option{% if b == backup %} selected{% endif %}>{{ b }}</option>{% endfor %}</select></div>
+      <div><label for="bp">Tools password</label><input id="bp" type="password" name="tools_password" required autocomplete="off"></div><div style="flex:0 1 170px"><label for="bp-otp">Authenticator code</label><input id="bp-otp" type="text" name="otp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" required autocomplete="one-time-code" placeholder="123456"></div>
+      <div style="flex:0 0 auto"><button class="plain" type="submit">Download backup</button></div>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+{% if log %}
+<div class="card">
+  <h2>Recent activity</h2>
+  <table><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th></tr>
+    {% for e in log %}<tr><td>{{ e.at_text }}</td><td>{{ e.user }}</td><td>{{ e.action }}</td><td>{{ e.detail }}</td></tr>{% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<script>
+  // "Are you sure?" before importing or removing.
+  document.querySelectorAll("form[data-confirm]").forEach(function (form) {
+    form.addEventListener("submit", function (e) {
+      if (!window.confirm(form.getAttribute("data-confirm"))) e.preventDefault();
+    });
+  });
+</script>
+{% endblock %}

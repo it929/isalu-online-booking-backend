@@ -1,0 +1,21 @@
+{% extends "superuser_tools/base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:60px auto 0">
+  <h1>Sign in</h1>
+  <p class="muted">Restricted area.</p>
+  {% if error %}<div class="msg err">{{ error }}</div>{% endif %}
+  <form method="post" autocomplete="off">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="signin">
+    <label for="u">Username</label>
+    <input id="u" type="text" name="username" required autocomplete="username">
+    <label for="p">Password</label>
+    <input id="p" type="password" name="password" required autocomplete="current-password">
+    <label for="c">Authenticator code</label>
+    <input id="c" type="text" name="otp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" placeholder="6-digit code from your app">
+    <p class="muted" style="margin-top:6px">First time here? Leave the code empty: after your password is checked you'll get a QR code to add this page to Google Authenticator.</p>
+    <div style="margin-top:16px"><button type="submit" {% if locked %}disabled{% endif %}>Sign in</button></div>
+  </form>
+</div>
+{% endblock %}

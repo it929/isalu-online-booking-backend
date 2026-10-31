@@ -317,3 +317,12 @@ if DEBUG and os.getenv("DJANGO_PRODUCTION_WARNINGS", "True").lower() in ("true",
         "(see .env.production.example)."
     )
 SHARED_CACHE = "redis" in str(CACHES.get("default", {}).get("BACKEND", "")).lower()
+
+# Hidden superuser bookings tools (bulk CSV upload, downloads, remove all).
+# Off unless SUPERUSER_TOOLS_PATH is set to a long secret slug; the page is
+# then at /api/<slug>/. Uploaded previews and pre-delete backups are kept in
+# SUPERUSER_TOOLS_DIR (outside git).
+SUPERUSER_TOOLS_PATH = os.getenv("SUPERUSER_TOOLS_PATH", "").strip()
+SUPERUSER_TOOLS_DIR = os.getenv("SUPERUSER_TOOLS_DIR", str(BASE_DIR / "superuser_tools_data"))
+# Extra addresses (comma separated) for the tools page alert emails; superusers with an email always get them.
+SUPERUSER_TOOLS_ALERT_EMAIL = os.getenv("SUPERUSER_TOOLS_ALERT_EMAIL", "").strip()

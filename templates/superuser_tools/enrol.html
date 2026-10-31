@@ -1,0 +1,27 @@
+{% extends "superuser_tools/base.html" %}
+{% block title %}Set up authenticator{% endblock %}
+{% block content %}
+<div class="card" style="max-width:520px;margin:40px auto 0" data-testid="enrol">
+  <h1>Set up your authenticator app</h1>
+  <p class="muted">Signed in as <b>{{ username }}</b>. This page needs a 6-digit code from an authenticator app every time you sign in and before every action.</p>
+  {% if error %}<div class="msg err" data-testid="enrol-error">{{ error }}</div>{% endif %}
+
+  <h2 style="margin-top:18px">1. Add it to Google Authenticator</h2>
+  <p>Open <b>Google Authenticator</b> on your phone, tap <b>+</b>, then <b>Scan a QR code</b>, and scan this:</p>
+  {% if qr %}<div data-testid="enrol-qr" style="display:flex;justify-content:center;margin:12px 0;padding:12px;background:#fff;border:1px solid var(--line);border-radius:12px">{{ qr|safe }}</div>{% endif %}
+  <p class="muted">Can't scan? Tap <b>Enter a setup key</b> instead. Account: <b>Isalu Tools ({{ username }})</b> · Key (spaces don't matter):</p>
+  <p><code data-testid="enrol-key" style="font-size:15px;letter-spacing:1px;user-select:all">{{ key }}</code> · Type of key: <b>Time based</b></p>
+
+  <h2 style="margin-top:18px">2. Confirm</h2>
+  <form method="post" autocomplete="off">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="enrol">
+    <label for="ec">6-digit code the app now shows for Isalu Tools</label>
+    <input id="ec" type="text" name="otp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" required autocomplete="one-time-code" placeholder="123456">
+    <label for="et">Tools password</label>
+    <input id="et" type="password" name="tools_password" required autocomplete="off">
+    <div style="margin-top:16px"><button class="green" type="submit" {% if locked %}disabled{% endif %}>Confirm and continue</button></div>
+  </form>
+  <p class="muted" style="margin-top:12px">Nothing is saved until the code matches. This screen expires in 10 minutes. The QR code is shown once: if someone else might have seen it, ask a server admin to run <code>python manage.py setup_tools_2fa {{ username }} --remove</code> and set it up again.</p>
+</div>
+{% endblock %}
