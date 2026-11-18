@@ -558,7 +558,14 @@ def confirm_payment(reference, transaction_data=None, source="verify", actor="",
 
         # Paid in time, or paid late but the slot is still free: confirm.
         still_held = booking.counts_toward_capacity
-        if not still_held:
+        if not still_held and getattr(booking, "is_online", False):
+            # Online consultation: paid late, but is its video slot still free?
+            from .telemedicine import taken_slot_starts
+            sess = booking.online_session
+            still_held = bool(sess) and booking.slot_start is not None and (
+                timezone.localtime(booking.slot_start).replace(second=0, microsecond=0)
+                not in taken_slot_starts(sess, exclude_ref=booking.ref_code))
+        elif not still_held:
             doctor = Doctor.objects.filter(doc_id=booking.doctor_id).first()
             day = parse_date(booking.date)
             capacity = resolve_doctor_day(doctor, day)["capacity"] if doctor and day else 0

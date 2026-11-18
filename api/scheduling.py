@@ -524,7 +524,7 @@ def resolve_doctor_day(doctor, date_val, ignore_exceptions=False):
             return result
         moved_out = exceptions["original"].get(iso)
         if moved_out is not None:
-            if moved_out.action == "reschedule":
+            if moved_out.action in ("reschedule", "merge"):
                 note = f"Clinic moved to {moved_out.new_date}"
             else:
                 note = "Clinic cancelled" + (f": {moved_out.reason}" if moved_out.reason else "")
@@ -614,8 +614,8 @@ def inactive_status_q():
     return q
 
 
-def capacity_bookings_qs(queryset=None):
-    """Bookings that consume a doctor's daily capacity."""
+def active_bookings_qs(queryset=None):
+    """Active bookings (in person or online): not cancelled, and unpaid holds only until they expire."""
     if queryset is None:
         from .models import Booking
         queryset = Booking.objects.all()
@@ -626,6 +626,12 @@ def capacity_bookings_qs(queryset=None):
         # Unpaid online bookings stop holding their slot once the hold expires.
         .exclude(Q(status__iexact=AWAITING_PAYMENT) & (Q(payment_expires_at__isnull=True) | Q(payment_expires_at__lte=_tz.now())))
     )
+
+
+def capacity_bookings_qs(queryset=None):
+    """Bookings that consume a doctor's daily (in-person) capacity. Online video
+    consultations have their own slots (telemedicine) and never count here."""
+    return active_bookings_qs(queryset).exclude(consultation_mode="online")
 
 
 def count_doctor_bookings(doctor_id, date_val, exclude_ref=None):

@@ -115,12 +115,16 @@ class StartPaymentView(APIView):
         data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
         data["payment_type"] = "Private Self-Pay"
         data["paymentType"] = "Private Self-Pay"
-        serializer = BookingSerializer(data=data, context={"request": request})
+        serializer = BookingSerializer(data=data, context={"request": request, "online_payment_flow": True})
         if not serializer.is_valid():
             return Response(flatten_error_detail(serializer.errors), status=status.HTTP_400_BAD_REQUEST)
 
         doctor = Doctor.objects.select_related("department").filter(doc_id=serializer.validated_data["doctor_id"]).first()
-        fee = payments.clinic_fee(doctor, serializer.validated_data.get("visit_type"))
+        if serializer.validated_data.get("consultation_mode") == "online":
+            from .telemedicine import online_fee
+            fee = online_fee(doctor)   # online (video) consultation: the clinic's own price
+        else:
+            fee = payments.clinic_fee(doctor, serializer.validated_data.get("visit_type"))
         if fee <= 0:
             return Response(
                 {"error": "This clinic has no online consultation fee. Book without paying online and pay at the cashdesk."},

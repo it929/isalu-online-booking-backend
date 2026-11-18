@@ -152,6 +152,14 @@ class Department(models.Model):
         default=0,
     )
 
+    # Online (video) consultation fee in Naira, paid online when booking a
+    # telemedicine slot. 0 = this clinic offers no online consultations.
+    online_fee = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+    )
+
     class Meta:
         ordering = ["name"]
 
@@ -649,6 +657,35 @@ class Booking(models.Model):
     arrived_at = models.DateTimeField(null=True, blank=True)
     arrived_by = models.CharField(max_length=200, blank=True, default="")
 
+    # ---- Online (video) consultation -----------------------------------
+    # "in_person" (every booking before telemedicine) or "online". Online
+    # bookings take a slot in an OnlineClinicSession, never in-person capacity.
+    consultation_mode = models.CharField(max_length=12, default="in_person", db_index=True)
+    online_session = models.ForeignKey(
+        "OnlineClinicSession", null=True, blank=True, on_delete=models.SET_NULL, related_name="bookings"
+    )
+    slot_start = models.DateTimeField(null=True, blank=True)
+    slot_end = models.DateTimeField(null=True, blank=True)
+    # Secret for the patient's join link (/consult/<video_token>).
+    video_token = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # "" (not yet), "in_call", "completed", "missed".
+    call_status = models.CharField(max_length=20, blank=True, default="")
+    call_extended_minutes = models.PositiveIntegerField(default=0)
+    call_started_at = models.DateTimeField(null=True, blank=True)
+    call_ended_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def is_online(self):
+        return (self.consultation_mode or "") == "online"
+
+    @property
+    def effective_slot_end(self):
+        """The patient's timeframe end, including any extension the doctor gave."""
+        if not self.slot_end:
+            return None
+        import datetime as _dt
+        return self.slot_end + _dt.timedelta(minutes=int(self.call_extended_minutes or 0))
+
     # Optional hospital card number the patient typed on the booking form.
     hospital_card_number = models.CharField(max_length=30, blank=True, default="", db_index=True)
 
@@ -764,15 +801,21 @@ class ScheduleException(models.Model):
                 for that occurrence only. Affected bookings move to `new_date`
                 and patients are notified; the normal 3-hour reminder then
                 fires for the new date.
+    merge:      the clinic on `original_date` does not hold, and its patients
+                join the doctor's existing clinic on `new_date` (a date the
+                doctor already holds clinic), at that clinic's hours. That
+                clinic's schedule and capacity are unchanged.
 
     The doctor's regular schedule (SpecialistSchedule) is never modified.
     """
 
     ACTION_CANCEL = "cancel"
     ACTION_RESCHEDULE = "reschedule"
+    ACTION_MERGE = "merge"
     ACTION_CHOICES = [
         (ACTION_CANCEL, "Cancel clinic"),
         (ACTION_RESCHEDULE, "Move clinic to another date"),
+        (ACTION_MERGE, "Move patients to another clinic date"),
     ]
 
     exception_id = models.CharField(max_length=100, primary_key=True)
@@ -788,7 +831,8 @@ class ScheduleException(models.Model):
     action = models.CharField(max_length=20, choices=ACTION_CHOICES)
     new_date = models.CharField(max_length=10, blank=True, default="", db_index=True)
 
-    # Clinic hours and capacity on new_date (reschedule only).
+    # Clinic hours and capacity on new_date (reschedule only; for merge,
+    # shift_times records the target clinic's hours and capacity stays 0).
     shift_times = models.JSONField(default=list, blank=True)
     capacity = models.PositiveIntegerField(default=0)
 
@@ -816,7 +860,7 @@ class ScheduleException(models.Model):
         ]
 
     def __str__(self):
-        target = f" -> {self.new_date}" if self.action == self.ACTION_RESCHEDULE else ""
+        target = f" -> {self.new_date}" if self.action in (self.ACTION_RESCHEDULE, self.ACTION_MERGE) else ""
         return f"{self.doctor_id} {self.original_date} {self.action}{target}"
 
 
@@ -1018,3 +1062,43 @@ class ReschedulePayment(models.Model):
 
     def __str__(self):
         return f"Reschedule {self.booking_ref} -> {self.new_date} ({self.status})"
+
+
+class OnlineClinicSession(models.Model):
+    """
+    A doctor's online (video) clinic on one date, from start_time to
+    end_time, split into slots of slot_minutes. Each paid online booking
+    holds one slot: that is the patient's timeframe for the consultation.
+    """
+
+    STATUS_SCHEDULED = "scheduled"
+    STATUS_LIVE = "live"
+    STATUS_ENDED = "ended"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_SCHEDULED, "Scheduled"),
+        (STATUS_LIVE, "Live"),
+        (STATUS_ENDED, "Ended"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+
+    session_id = models.CharField(max_length=40, primary_key=True)
+    doctor = models.ForeignKey(Doctor, on_delete=models.CASCADE, related_name="online_sessions")
+    date = models.CharField(max_length=10, db_index=True)        # YYYY-MM-DD
+    start_time = models.CharField(max_length=5)                   # HH:MM (24h)
+    end_time = models.CharField(max_length=5)
+    slot_minutes = models.PositiveIntegerField(default=15)
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=STATUS_SCHEDULED)
+    notes = models.CharField(max_length=300, blank=True, default="")
+    created_by = models.CharField(max_length=200, blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["date", "start_time"]
+
+    def __str__(self):
+        return f"Online clinic {self.doctor_id} {self.date} {self.start_time}-{self.end_time} ({self.status})"
+

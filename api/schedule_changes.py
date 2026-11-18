@@ -1,6 +1,8 @@
 """
-One-off clinic changes: cancel a doctor's clinic on a specific date, or move
-that single occurrence to another date. The regular schedule is untouched.
+One-off clinic changes: cancel a doctor's clinic on a specific date, move
+that single occurrence to another date, or move its patients to another of
+the doctor's existing clinic dates ("merge"). The regular schedule is
+untouched.
 
 Flow
 ----
@@ -51,15 +53,62 @@ def affected_bookings_qs(doctor, date_iso):
     return qs.order_by("time", "created_at")
 
 
-def preview_schedule_change(doctor, date_val):
-    """What would be affected if the clinic on date_val were changed."""
+def merge_target_info(doctor, target, moving_count=0, original=None):
+    """
+    The doctor's clinic on `target` as a destination for a merge: whether it
+    can take the patients, its hours, capacity and how full it would be.
+    """
+    clear_exception_cache(doctor)
+    state = resolve_doctor_day(doctor, target)
+    booked = capacity_bookings_qs().filter(doctor_id=doctor.doc_id, date=target.isoformat()).count()
+    capacity = state["capacity"] if state["on_duty"] else 0
+    shifts = list(state["config"].get("shiftTimes") or []) or ([state["shift"]] if state["shift"] else [])
+    problem = ""
+    if target < timezone.localdate():
+        problem = "The clinic date to move to cannot be in the past."
+    elif original is not None and target == original:
+        problem = "Choose a different clinic date from the one being changed."
+    elif not state["on_duty"]:
+        problem = (state["note"] + ". " if state["note"] else "") +             f"There is no clinic on {target.strftime('%A %d %b %Y')} to move the patients to."
+    return {
+        "date": target.isoformat(),
+        "on_duty": bool(state["on_duty"]),
+        "shift": state["shift"],
+        "shift_times": shifts,
+        "capacity": capacity,
+        "booked": booked,
+        "moving": moving_count,
+        "after_move": booked + moving_count,
+        "over_capacity": bool(state["on_duty"]) and booked + moving_count > capacity,
+        "problem": problem,
+    }
+
+
+def preview_schedule_change(doctor, date_val, target_date=None):
+    """What would be affected if the clinic on date_val were changed.
+    With target_date: also how the doctor's clinic on that date would take
+    the patients (for moving them to another clinic date)."""
     day = parse_date(date_val)
     if not day:
         raise ScheduleChangeError("Invalid date. Use YYYY-MM-DD.")
     regular = resolve_doctor_day(doctor, day, ignore_exceptions=True)
     current = resolve_doctor_day(doctor, day)
     bookings = list(affected_bookings_qs(doctor, day.isoformat()))
-    return {
+    target_block = None
+    if target_date:
+        target = parse_date(target_date)
+        if not target:
+            raise ScheduleChangeError("Invalid clinic date to move to. Use YYYY-MM-DD.")
+        target_block = merge_target_info(doctor, target, len(bookings), original=day)
+        already = set(
+            capacity_bookings_qs().filter(doctor_id=doctor.doc_id, date=target.isoformat())
+            .values_list("patient_phone", flat=True)
+        )
+        target_block["already_booked_there"] = [
+            {"ref_code": b.ref_code, "patient_name": b.patient_name}
+            for b in bookings if (b.patient_phone or "").strip() and b.patient_phone in already
+        ]
+    result = {
         "doctor_id": doctor.doc_id,
         "date": day.isoformat(),
         "on_duty": bool(regular["on_duty"]),
@@ -75,6 +124,9 @@ def preview_schedule_change(doctor, date_val):
             for b in bookings
         ],
     }
+    if target_block is not None:
+        result["target"] = target_block
+    return result
 
 
 def apply_schedule_exception(
@@ -85,9 +137,11 @@ def apply_schedule_exception(
     shift_times=None,
     reason="",
     created_by="",
+    allow_over_capacity=False,
 ):
-    if action not in (ScheduleException.ACTION_CANCEL, ScheduleException.ACTION_RESCHEDULE):
-        raise ScheduleChangeError("Action must be 'cancel' or 'reschedule'.")
+    if action not in (ScheduleException.ACTION_CANCEL, ScheduleException.ACTION_RESCHEDULE,
+                      ScheduleException.ACTION_MERGE):
+        raise ScheduleChangeError("Action must be 'cancel', 'reschedule' or 'merge'.")
 
     today = timezone.localdate()
     original = parse_date(original_date)
@@ -116,7 +170,9 @@ def apply_schedule_exception(
                 f"The {original.strftime('%a %d %b %Y')} clinic for {display} has already been changed. "
                 "Undo that change first."
             )
-        if ScheduleException.objects.filter(doctor=doctor, new_date=original.isoformat()).exists():
+        if ScheduleException.objects.filter(
+            doctor=doctor, new_date=original.isoformat(), action=ScheduleException.ACTION_RESCHEDULE
+        ).exists():
             raise ScheduleChangeError(
                 f"{original.isoformat()} is itself a moved clinic. Undo that move instead of changing it again."
             )
@@ -155,6 +211,23 @@ def apply_schedule_exception(
         bookings = list(affected_bookings_qs(doctor, original.isoformat()))
         refs = [b.ref_code for b in bookings]
 
+        if action == ScheduleException.ACTION_MERGE:
+            # Move the patients to another clinic the doctor already holds.
+            target = parse_date(new_date)
+            if not target:
+                raise ScheduleChangeError("Choose the clinic date to move the patients to.")
+            info = merge_target_info(doctor, target, len(refs), original=original)
+            if info["problem"]:
+                raise ScheduleChangeError(info["problem"])
+            if info["over_capacity"] and not allow_over_capacity:
+                raise ScheduleChangeError(
+                    f"The {target.strftime('%A %d %b %Y')} clinic for {display} takes {info['capacity']} patient(s) "
+                    f"and already has {info['booked']}. Moving {len(refs)} more would make {info['after_move']}. "
+                    "Tick 'Allow more patients than the clinic limit' to move them anyway, or choose another date."
+                )
+            # The patients take the target clinic's hours; its schedule is not changed.
+            shift_times = info["shift_times"]
+
         exception = ScheduleException.objects.create(
             exception_id=_generate_id(),
             doctor=doctor,
@@ -162,7 +235,10 @@ def apply_schedule_exception(
             action=action,
             new_date=target.isoformat() if target else "",
             shift_times=shift_times if target else [],
-            capacity=max(regular["capacity"], len(refs)) if target else 0,
+            capacity=(
+                max(regular["capacity"], len(refs))
+                if action == ScheduleException.ACTION_RESCHEDULE else 0
+            ),
             reason=reason,
             affected_refs=refs,
             affected_count=len(refs),

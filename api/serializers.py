@@ -148,7 +148,10 @@ class DepartmentSerializer(serializers.ModelSerializer):
             "firstVisitFee": "consultation_fee",
             "first_visit_fee": "consultation_fee",
             "followUpFee": "follow_up_fee",
+            "onlineFee": "online_fee",
         })
+        if "online_fee" in data_copy and data_copy.get("online_fee") in ("", None):
+            data_copy["online_fee"] = 0
         if "consultation_fee" in data_copy and data_copy.get("consultation_fee") in ("", None):
             data_copy["consultation_fee"] = 0
         if "follow_up_fee" in data_copy and data_copy.get("follow_up_fee") in ("", None):
@@ -181,6 +184,15 @@ class DepartmentSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("The consultation fee can't be negative.")
         if value > 10_000_000:
             raise serializers.ValidationError("The consultation fee looks too large. Enter the amount in Naira.")
+        return value
+
+    def validate_online_fee(self, value):
+        if value is None:
+            return 0
+        if value < 0:
+            raise serializers.ValidationError("The online consultation fee can't be negative.")
+        if value > 10_000_000:
+            raise serializers.ValidationError("The online consultation fee looks too large. Enter the amount in Naira.")
         return value
 
     def validate_follow_up_fee(self, value):
@@ -226,6 +238,9 @@ class DepartmentSerializer(serializers.ModelSerializer):
         follow = float(getattr(instance, "follow_up_fee", 0) or 0)
         ret["follow_up_fee"] = follow
         ret["followUpFee"] = follow
+        online = float(getattr(instance, "online_fee", 0) or 0)
+        ret["online_fee"] = online
+        ret["onlineFee"] = online
 
         doc_count = instance.doctors.count()
         ret["doctor_count"] = doc_count if doc_count > 0 else (instance.doctor_count or 0)
@@ -556,6 +571,9 @@ class BookingSerializer(serializers.ModelSerializer):
             "cashdesk_referral_status", "cashdesk_referral_note", "cashdesk_referred_by", "cashdesk_referred_at",
             "cashdesk_settle_note", "cashdesk_settled_by", "cashdesk_settled_at", "balance_collected", "balance_method",
             "arrived_at", "arrived_by",
+            # Online consultation: set only in validate()/create() and by the telemedicine actions.
+            "consultation_mode", "online_session", "slot_start", "slot_end", "video_token",
+            "call_status", "call_extended_minutes", "call_started_at", "call_ended_at",
         ]
         # Derived from the selected doctor in validate().
         extra_kwargs = {
@@ -624,6 +642,21 @@ class BookingSerializer(serializers.ModelSerializer):
             parsed = parse_date(data_copy["date"])
             if parsed:
                 data_copy["date"] = parsed.isoformat()
+
+        # Online consultations take their date and time from the chosen online
+        # clinic slot; fill them in so the required-field checks pass (the slot
+        # itself is validated in _validate_online).
+        mode = str(data_copy.get("consultation_mode") or data_copy.get("consultationMode") or "").strip().lower()
+        if mode == "online" and self.instance is None:
+            from .models import OnlineClinicSession
+            sid = str(data_copy.get("online_session_id") or data_copy.get("onlineSessionId") or "").strip()
+            sess = OnlineClinicSession.objects.filter(session_id=sid).only("date", "start_time").first() if sid else None
+            if sess is not None:
+                data_copy["date"] = sess.date
+                data_copy["time"] = data_copy.get("time") or "Online"
+            else:
+                data_copy.setdefault("date", timezone.localdate().isoformat())
+                data_copy["time"] = data_copy.get("time") or "Online"
 
         return super().to_internal_value(data_copy)
 
@@ -694,6 +727,13 @@ class BookingSerializer(serializers.ModelSerializer):
         ret["balanceCollected"] = float(instance.balance_collected) if instance.balance_collected is not None else None
         ret["balanceMethod"] = instance.balance_method or ""
         ret["arrivedAt"] = instance.arrived_at.isoformat() if instance.arrived_at else None
+        ret.pop("video_token", None)   # the join link is the patient's secret
+        ret["consultationMode"] = instance.consultation_mode or "in_person"
+        ret["onlineSessionId"] = instance.online_session_id or ""
+        ret["slotStart"] = instance.slot_start.isoformat() if instance.slot_start else None
+        ret["slotEnd"] = instance.effective_slot_end.isoformat() if instance.slot_end else None
+        ret["callStatus"] = instance.call_status or ""
+        ret["callExtendedMinutes"] = int(instance.call_extended_minutes or 0)
         ret["arrivedBy"] = instance.arrived_by or ""
         ret["hospitalCardNumber"] = instance.hospital_card_number or ""
         ret["bookedForOther"] = bool(instance.booked_for_other)
@@ -768,6 +808,42 @@ class BookingSerializer(serializers.ModelSerializer):
         if inst is not None and "visit_type" not in data and "follow_up_acknowledged" not in data:
             return
         visit = payments.normalize_visit_type(data.get("visit_type", inst.visit_type if inst else ""))
+        # The visit type is decided by the patient's records, not chosen. In each
+        # clinic (department) it follows the order of their booking records:
+        # private First, Follow-up, First, Follow-up...; HMO/Company First,
+        # Follow-up, Follow-up, First... (duplicates.auto_visit_type). Applied to
+        # every new booking and every change of visit type, from any source.
+        if inst is None or "visit_type" in data:
+            asked = visit if str(data.get("visit_type") or "").strip() else None
+            auto_doc = _resolve_doctor(data.get("doctor_id") or (inst.doctor_id if inst else None))
+            if auto_doc is not None:
+                from .duplicates import auto_visit_type, follow_ups_per_first_visit
+                seq_pay_type = data.get("payment_type", inst.payment_type if inst else "Private Self-Pay")
+                visit, _cycle_start, _until = auto_visit_type(
+                    auto_doc,
+                    data.get("patient_name", inst.patient_name if inst else ""),
+                    data.get("patient_phone", inst.patient_phone if inst else ""),
+                    data.get("hospital_card_number", inst.hospital_card_number if inst else ""),
+                    appointment_date=parse_date(data.get("date") or (inst.date if inst else None)),
+                    exclude_ref=inst.ref_code if inst else None,
+                    created_before=inst.created_at if inst else None,
+                    payment_type=seq_pay_type,
+                )
+                # Asked for the other type: refuse (no silent change of fee), saying which one applies.
+                if asked is not None and asked != visit:
+                    order = ("First visit, Follow-up, Follow-up" if follow_ups_per_first_visit(seq_pay_type) == 2
+                             else "First visit, Follow-up")
+                    if visit == payments.FIRST_VISIT:
+                        raise self._error(
+                            f"This booking is a first visit: in each clinic, bookings go {order}, then First visit again. "
+                            "Please choose First visit to continue.",
+                            follow_up_locked=True, visit_type_required=visit, field="visit_type",
+                        )
+                    raise self._error(
+                        f"This booking is a follow-up visit: in each clinic, bookings go {order}, then First visit again. "
+                        "Please choose Follow-up to continue.",
+                        first_visit_locked=True, visit_type_required=visit, field="visit_type",
+                    )
         data["visit_type"] = visit
         if visit != payments.FOLLOW_UP:
             data["follow_up_acknowledged"] = False
@@ -779,26 +855,8 @@ class BookingSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         from .views import is_staff_request  # local import: views imports this module
         staff = request is not None and is_staff_request(request)
-        # A follow-up must be within a month of the patient's last appointment in this
-        # clinic; after that, online bookings are a first visit (staff may override).
-        if request is not None and not staff and doc is not None and (inst is None or "visit_type" in data):
-            from .duplicates import FOLLOW_UP_WINDOW_DAYS, follow_up_locked
-            appt = parse_date(data.get("date") or (inst.date if inst else None))
-            locked, last_day = follow_up_locked(
-                doc,
-                data.get("patient_name", inst.patient_name if inst else ""),
-                data.get("patient_phone", inst.patient_phone if inst else ""),
-                data.get("hospital_card_number", inst.hospital_card_number if inst else ""),
-                appointment_date=appt,
-                exclude_ref=inst.ref_code if inst else None,
-            )
-            if locked:
-                raise self._error(
-                    f"Your last appointment in this clinic was more than {FOLLOW_UP_WINDOW_DAYS} days before this one, "
-                    "so this booking is a first visit. Please choose First visit to continue.",
-                    follow_up_locked=True,
-                    field="visit_type",
-                )
+        # (The old 30-day limit on follow-ups no longer applies: the visit type
+        # follows the order of the patient's booking records, above.)
         agreed = data.get("follow_up_acknowledged", inst.follow_up_acknowledged if inst else False)
         agreed = agreed is True or str(agreed).strip().lower() in ("true", "1", "yes", "on")
         data["follow_up_acknowledged"] = agreed
@@ -907,6 +965,65 @@ class BookingSerializer(serializers.ModelSerializer):
             data["hmo_name"] = company.name
         data["hmo_policy_code"] = ""
 
+    def _requested_mode(self):
+        inst = self.instance
+        raw = ""
+        if hasattr(self, "initial_data") and hasattr(self.initial_data, "get"):
+            raw = str(self.initial_data.get("consultation_mode") or self.initial_data.get("consultationMode") or "").strip().lower()
+        if inst is not None:
+            current = inst.consultation_mode or "in_person"
+            if raw and raw.replace("-", "_") not in (current, current.replace("_", "-")):
+                raise self._error("A booking can't be switched between in-person and online. Please book again.")
+            return current
+        return "online" if raw == "online" else "in_person"
+
+    def _validate_online(self, data):
+        from . import payments as _payments
+        from . import telemedicine as tm
+        from .duplicates import normalize_name, normalize_phone
+        from .models import OnlineClinicSession
+        if self.instance is not None:
+            raise self._error("An online consultation can't be moved to another time online. Please contact the hospital.")
+        if not self.context.get("online_payment_flow"):
+            raise self._error("Online consultations are booked and paid for on the booking page.")
+        if _payments.is_sponsored(data.get("payment_type") or "Private Self-Pay"):
+            raise self._error("Online consultations are available to Private Self-Pay patients.")
+        ini = self.initial_data
+        sid = str(ini.get("online_session_id") or ini.get("onlineSessionId") or "").strip()
+        session = OnlineClinicSession.objects.select_related("doctor", "doctor__department").filter(session_id=sid).first()
+        if session is None or session.status not in (OnlineClinicSession.STATUS_SCHEDULED, OnlineClinicSession.STATUS_LIVE):
+            raise self._error("That online clinic is no longer available. Please choose another time.", field="online_session")
+        doc = session.doctor
+        asked_doc = str(data.get("doctor_id") or "").strip()
+        if asked_doc and asked_doc.lower() != doc.doc_id.lower():
+            raise self._error("The selected time belongs to another doctor's online clinic. Please choose again.")
+        if not doc.status:
+            raise self._error(f"Doctor Profile Inactive: {doc.full_name or doc.name} is currently unavailable.")
+        if tm.online_fee(doc) <= 0:
+            raise self._error("This clinic doesn't offer online consultations at the moment.")
+        slot = tm.find_slot(session, ini.get("slot_start") or ini.get("slotStart"))
+        if slot is None:
+            raise self._error("Choose one of the online clinic's time slots.", field="slot_start")
+        start, end = slot
+        if start < tm.slot_bookable_from():
+            raise self._error("That time has passed or starts too soon. Please choose a later time.", field="slot_start")
+        if timezone.localtime(start).replace(second=0, microsecond=0) in tm.taken_slot_starts(session):
+            raise self._error("That time was just taken by another patient. Please choose another time.", slot_taken=True, field="slot_start")
+        # One slot per patient in an online clinic.
+        name_key = normalize_name(data.get("patient_name", ""))
+        phone_key = normalize_phone(data.get("patient_phone", ""))
+        for b in tm.active_online_qs().filter(online_session=session).only("patient_name", "patient_phone"):
+            if normalize_name(b.patient_name) == name_key and normalize_phone(b.patient_phone) == phone_key:
+                raise self._error("You already have a time in this online clinic. Please choose another day.", duplicate=True)
+        data["consultation_mode"] = "online"
+        data["doctor_id"] = doc.doc_id
+        data["doctor_name"] = doc.full_name or doc.name
+        data["doctor_specialty"] = doc.department.name if doc.department else (doc.specialty or "General Medicine")
+        data["date"] = session.date
+        data["time"] = tm.slot_label(start, end)
+        self._online = (session.session_id, start, end)
+        return data
+
     def _scheduling_changed(self, data):
         if self.instance is None:
             return True
@@ -937,6 +1054,13 @@ class BookingSerializer(serializers.ModelSerializer):
         self._validate_phone(data)
         self._validate_card_and_booker(data)
         self._validate_visit_type(data)
+
+        # Online (video) consultations book a slot in an online clinic session;
+        # the in-person checks below (roster, capacity, HMO window) don't apply.
+        if self._requested_mode() == "online":
+            if inst is None or self._scheduling_changed(data):
+                return self._validate_online(data)
+            return data
 
         if not self._scheduling_changed(data):
             # Editing the patient's name/phone must not create a duplicate either.
@@ -992,6 +1116,8 @@ class BookingSerializer(serializers.ModelSerializer):
             from .views import is_staff_request  # local import: views imports this module
             from . import payments as _payments
             pay_type = data.get("payment_type", inst.payment_type)
+            # Moving a booking keeps its visit type (the order of records is unchanged);
+            # there is no 30-day limit on follow-ups any more.
             if req is not None and not is_staff_request(req) and not _payments.is_sponsored(pay_type):
                 if appt_date > now_local.date() + datetime.timedelta(days=RESCHEDULE_WINDOW_DAYS):
                     raise self._error(
@@ -1009,7 +1135,7 @@ class BookingSerializer(serializers.ModelSerializer):
             )
         if resolved["reason"] in ("cancelled", "moved_out"):
             exc = resolved["exception"]
-            if exc.action == "reschedule":
+            if exc.action in ("reschedule", "merge"):
                 raise self._error(
                     f"Clinic moved: the {display} clinic on {appt_date.strftime('%b %d, %Y')} "
                     f"has been moved to {parse_date(exc.new_date).strftime('%A, %b %d, %Y')}. "
@@ -1125,6 +1251,8 @@ class BookingSerializer(serializers.ModelSerializer):
             )
 
     def create(self, validated_data):
+        if getattr(self, "_online", None):
+            return self._create_online(validated_data)
         with transaction.atomic():
             if not validated_data.get("doctor_id"):
                 raise self._error("A doctor is required.")
@@ -1137,6 +1265,20 @@ class BookingSerializer(serializers.ModelSerializer):
                 validated_data.get("payment_type"),
             )
             validated_data["ref_code"] = self._generate_ref_code()
+            return Booking.objects.create(**validated_data)
+
+    def _create_online(self, validated_data):
+        from . import telemedicine as tm
+        from .models import OnlineClinicSession
+        sid, start, end = self._online
+        with transaction.atomic():
+            session = OnlineClinicSession.objects.select_for_update().get(session_id=sid)
+            if timezone.localtime(start).replace(second=0, microsecond=0) in tm.taken_slot_starts(session):
+                raise self._error("That time was just taken by another patient. Please choose another time.", slot_taken=True)
+            validated_data.update(
+                consultation_mode=tm.ONLINE, online_session=session, slot_start=start, slot_end=end,
+                video_token=tm.new_video_token(), ref_code=self._generate_ref_code(),
+            )
             return Booking.objects.create(**validated_data)
 
     def update(self, instance, validated_data):

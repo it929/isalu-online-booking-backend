@@ -102,6 +102,11 @@ def send_email_reminder(booking, is_3hour_notice: bool = False) -> tuple[bool, s
         logger.info(f"Skipping Email reminder for booking {booking.ref_code}: Invalid or empty email '{recipient_email}'")
         return False, "No valid email address provided"
 
+    if getattr(booking, "is_online", False):
+        # Online video consultation: no hospital visit, send the join link instead.
+        subject, _sms, html_body, plain = _online_texts(booking, "reminder_3h" if is_3hour_notice else "reminder_day")
+        return _send_email(booking, recipient_email, subject, html_body, plain)
+
     patient_name = booking.patient_name or "Valued Patient"
     doctor_acronym = get_doctor_acronym_display(booking)
     doctor_specialty = booking.doctor_specialty or "General Clinic"
@@ -283,6 +288,10 @@ def send_sms_reminder(booking, is_3hour_notice: bool = False) -> tuple[bool, str
     if not phone or len(phone) < 7:
         logger.info(f"Skipping SMS reminder for booking {booking.ref_code}: Invalid phone number '{phone}'")
         return False, "No valid phone number provided"
+
+    if getattr(booking, "is_online", False):
+        _subject, sms_text, _h, _p = _online_texts(booking, "reminder_3h" if is_3hour_notice else "reminder_day")
+        return dispatch_sms(phone, sms_text, booking.ref_code)
 
     patient_name = (booking.patient_name or "Patient").split()[0]
     doctor_acronym = get_doctor_acronym_display(booking)
@@ -724,6 +733,25 @@ def _schedule_change_texts(booking, action: str, original_date: str, new_date: s
             "Please book a new appointment on our website or call us and we will be happy to help you "
             "find another date. If you have already paid, our Cashdesk will assist you."
         )
+    elif action == "merge":
+        new_display = format_booking_date_display(new_date)
+        time_display = booking.time or "your scheduled time"
+        subject = f"Appointment Moved to {new_display} [{ref_code}]"
+        sms = (
+            f"ISALU HOSPITALS: Dear {patient_first}, the {specialty} clinic on {_short_date(original_date)} will not hold. "
+            f"Your appt {ref_code} is MOVED to the clinic on {_short_date(new_date)}, {_short_time(time_display)}.{reason_line} "
+            f"Reminder 3hrs before. Call {HOSPITAL_PHONE} if unsuitable."
+        )
+        headline = "Your appointment has been moved"
+        detail = (
+            f"The <strong>{doctor_acronym} ({specialty})</strong> clinic on <strong>{old_display}</strong> will not hold. "
+            f"Your appointment <strong>{ref_code}</strong> has been moved to the doctor's clinic on "
+            f"<strong>{new_display}</strong> ({time_display}) automatically; you do not need to rebook."
+        )
+        next_step = (
+            "You will receive the usual reminder 3 hours before your appointment. If the new date does not "
+            f"suit you, please call us on {HOSPITAL_PHONE} or reschedule online with your reference code."
+        )
     else:
         new_display = format_booking_date_display(new_date)
         time_display = booking.time or "your scheduled time"
@@ -868,6 +896,21 @@ def _payment_notice_texts(booking, kind: str, amount=None):
         detail = (f"We received your online payment of <strong>{paid}</strong>. Your <strong>{specialty}</strong> "
                   f"appointment on <strong>{day}</strong> ({booking.time or 'your clinic time'}) is confirmed.")
         next_step = "Please show your reference code at the front desk when you arrive. You do not need to pay again."
+        if getattr(booking, "is_online", False):
+            from .telemedicine import join_url, join_early_minutes
+            link = join_url(booking)
+            link_text = link if link.startswith("http") else "the link on your ticket"
+            subject = f"Payment received: online {specialty} consultation on {day} [{ref_code}]"
+            sms = (f"ISALU HOSPITALS: Dear {patient_first}, payment of {paid} received. Your ONLINE {specialty} consultation "
+                   f"{ref_code} is on {_short_date(booking.date)}, {_short_time(booking.time)}. Join: {link_text}")
+            headline = "Your online consultation is confirmed"
+            detail = (f"We received your online payment of <strong>{paid}</strong>. Your <strong>online video consultation</strong> "
+                      f"with the {specialty} clinic is on <strong>{day}</strong>, <strong>{booking.time}</strong>.")
+            link_html = (f'<a href="{_html.escape(link)}" style="color:#008ac9; font-weight:bold;">{_html.escape(link)}</a>'
+                         if link.startswith("http") else "the link on your appointment ticket")
+            next_step = (f"Join from your phone or computer with {link_html}. You can enter the waiting room "
+                         f"{join_early_minutes()} minutes before your time; the doctor will let you in. "
+                         "Allow the camera and microphone when asked, and keep this link private.")
     elif kind == "refund_due":
         subject = f"Payment received, clinic full: refund on the way [{ref_code}]"
         sms = (f"ISALU HOSPITALS: Dear {patient_first}, we received {paid} for appt {ref_code}, but the clinic filled "
@@ -946,3 +989,114 @@ def send_payment_notice(booking, kind: str, amount=None) -> dict:
     channels = [ok for ok in (email_ok, sms_ok) if ok is not None]
     return {"email_sent": email_ok, "email_message": email_msg, "sms_sent": sms_ok, "sms_message": sms_msg,
             "delivered": any(channels)}
+
+
+# ---------------------------------------------------------------------------
+# Online (video) consultations
+# ---------------------------------------------------------------------------
+
+def _email_shell(patient_name, headline, detail, next_step, ref_code):
+    html_body = f"""
+    <html><body style="font-family: Arial, sans-serif; color:#0f172a; background:#f8fafc; padding:24px;">
+      <div style="max-width:560px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:16px; padding:24px;">
+        <h2 style="color:#008ac9; margin-top:0;">{HOSPITAL_NAME}</h2>
+        <h3 style="margin-bottom:8px;">{headline}</h3>
+        <p>Dear {_html.escape(patient_name)},</p>
+        <p>{detail}</p>
+        <p>{next_step}</p>
+        <p style="font-size:13px; color:#475569;">Reference code: <strong>{ref_code}</strong></p>
+        <hr style="border:none; border-top:1px solid #e2e8f0;">
+        <p style="font-size:12px; color:#64748b;">{HOSPITAL_NAME} &bull; {HOSPITAL_ADDRESS}<br>
+        Phone: {HOSPITAL_PHONE} | Email: {HOSPITAL_EMAIL}</p>
+      </div>
+    </body></html>
+    """
+    plain = re.sub(r"<[^>]+>", "", f"{headline}\n\nDear {patient_name},\n\n{detail}\n\n{next_step}\n\n"
+                   f"Reference: {ref_code}\n{HOSPITAL_NAME}, {HOSPITAL_PHONE}")
+    return html_body, plain
+
+
+def _online_texts(booking, kind: str):
+    """(subject, sms, html, plain) for an online consultation message.
+
+    kind: reminder_day | reminder_3h | doctor_started | doctor_ready
+    """
+    from .telemedicine import join_url, join_early_minutes
+    first = (booking.patient_name or "Patient").split()[0]
+    name = booking.patient_name or "Valued Patient"
+    specialty = booking.doctor_specialty or "Clinic"
+    ref = booking.ref_code
+    day = format_booking_date_display(booking.date)
+    when = booking.time or "your time"
+    link = join_url(booking)
+    link_text = link if link.startswith("http") else "the link on your ticket"
+    link_html = (f'<a href="{_html.escape(link)}" style="color:#008ac9; font-weight:bold;">{_html.escape(link)}</a>'
+                 if link.startswith("http") else "the link on your appointment ticket")
+    early = join_early_minutes()
+    if kind == "reminder_day":
+        subject = f"Reminder: online {specialty} consultation tomorrow ({day}) [{ref}]"
+        sms = (f"ISALU HOSPITALS: Hello {first}, reminder: your ONLINE {specialty} video consultation is tomorrow "
+               f"{_short_date(booking.date)}, {_short_time(when)}. Join from your phone: {link_text}")
+        headline = "Your online consultation is tomorrow"
+        detail = f"Your <strong>online video consultation</strong> with the {specialty} clinic is on <strong>{day}</strong>, <strong>{when}</strong>."
+        step = (f"Join with {link_html} from a phone or computer with a camera. The waiting room opens {early} minutes "
+                "before your time. Find a quiet, private place with good network.")
+    elif kind == "reminder_3h":
+        subject = f"Today: online {specialty} consultation at {_short_time(when)} [{ref}]"
+        sms = (f"ISALU HOSPITALS: Hello {first}, your ONLINE {specialty} video consultation is TODAY at {_short_time(when)}. "
+               f"Join {early} mins early: {link_text}")
+        headline = "Your online consultation is today"
+        detail = f"Your <strong>online video consultation</strong> is today, <strong>{when}</strong>."
+        step = f"Open {link_html} up to {early} minutes before your time and wait in the waiting room. The doctor will let you in."
+    elif kind == "doctor_started":
+        subject = f"The doctor has started the online clinic [{ref}]"
+        sms = (f"ISALU HOSPITALS: {first}, the {specialty} doctor has started the online clinic. Your time: {_short_time(when)}. "
+               f"Open your link now to wait: {link_text}")
+        headline = "The doctor is online"
+        detail = f"The {specialty} doctor has started today's online clinic. Your time is <strong>{when}</strong>."
+        step = f"Open {link_html} now and wait in the waiting room; you'll be let in at your time."
+    elif kind == "up_next":
+        subject = f"You're next for your online consultation [{ref}]"
+        sms = f"ISALU HOSPITALS: {first}, you're NEXT for your {specialty} video consultation. Open your link now and wait: {link_text}"
+        headline = "You're next"
+        detail = "The doctor will see you shortly."
+        step = f"Open {link_html} now and wait in the waiting room with your camera ready."
+    else:  # doctor_ready
+        subject = f"The doctor is ready for you now [{ref}]"
+        sms = f"ISALU HOSPITALS: {first}, the {specialty} doctor is READY for your video consultation now. Join: {link_text}"
+        headline = "The doctor is ready for you"
+        detail = "The doctor has let you in to your online consultation."
+        step = f"Open {link_html} now and allow the camera and microphone."
+    html_body, plain = _email_shell(name, headline, detail, step, ref)
+    return subject, sms, html_body, plain
+
+
+def _send_email(booking, recipient, subject, html_body, plain):
+    status = email_backend_status()
+    if not status["configured"]:
+        return False, "Email not configured"
+    try:
+        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", "Isalu Hospitals <no-reply@isalu.ng>")
+        msg = EmailMultiAlternatives(subject, plain, from_email, [recipient])
+        msg.attach_alternative(html_body, "text/html")
+        msg.send(fail_silently=False)
+        return True, "Email sent"
+    except Exception as exc:  # pragma: no cover - depends on the mail server
+        logger.warning(f"Email failed for {booking.ref_code}: {exc}")
+        return False, f"Email failed: {exc}"
+
+
+def send_online_notice(booking, kind: str, email: bool = False) -> dict:
+    """SMS (and optionally email) about an online consultation. Never raises."""
+    subject, sms_text, html_body, plain = _online_texts(booking, kind)
+    out = {"sms_sent": None, "email_sent": None}
+    phone = (booking.patient_phone or "").strip()
+    if phone and len(phone) >= 7:
+        try:
+            out["sms_sent"], out["sms_message"] = dispatch_sms(phone, sms_text, booking.ref_code, allow_console_fallback=False)
+        except Exception as exc:
+            out["sms_sent"], out["sms_message"] = False, str(exc)
+    addr = (booking.patient_email or "").strip()
+    if email and addr and "@" in addr and not addr.lower().startswith("patient-"):
+        out["email_sent"], out["email_message"] = _send_email(booking, addr, subject, html_body, plain)
+    return out

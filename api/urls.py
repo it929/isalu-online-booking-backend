@@ -36,6 +36,14 @@ router.register(r'settings', AppSettingViewSet, basename='setting')
 router.register(r'clinic-analytics', ClinicAnalyticsViewSet, basename='clinic-analytics')
 router.register(r'schedule-exceptions', ScheduleExceptionViewSet, basename='schedule-exception')
 
+from .telemedicine_views import (
+    OnlineSessionActionView,
+    OnlineSessionDetailView,
+    OnlineSessionListView,
+    PatientJoinView,
+    PublicOnlineSlotsView,
+)
+
 urlpatterns = [
     path('auth/staff-login/', StaffLoginView.as_view(), name='staff-login'),
     path('auth/me/', StaffProfileView.as_view(), name='staff-me'),
@@ -57,5 +65,11 @@ urlpatterns = [
     path('payments/reconcile/daily/', ReconcileDailyView.as_view(), name='payment-reconcile-daily'),
     path('payments/reconcile/ledger/', ReconcileLedgerView.as_view(), name='payment-reconcile-ledger'),
     path('payments/reconcile/sweep/', ReconcileSweepView.as_view(), name='payment-reconcile-sweep'),
+    # Online (video) consultations
+    path('online-sessions/', OnlineSessionListView.as_view(), name='online-sessions'),
+    path('online-sessions/<str:session_id>/', OnlineSessionDetailView.as_view(), name='online-session'),
+    path('online-sessions/<str:session_id>/<str:action>/', OnlineSessionActionView.as_view(), name='online-session-action'),
+    path('telemedicine/slots/', PublicOnlineSlotsView.as_view(), name='telemedicine-slots'),
+    path('telemedicine/join/<str:token>/', PatientJoinView.as_view(), name='telemedicine-join'),
     path('', include(router.urls)),
 ]

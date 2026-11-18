@@ -245,6 +245,7 @@ ALL_DESKS = [
     "create_specialist_schedule", "clinic", "disabled_bookings", "hmo_declined",
     "booking_payments", "companies", "cleared_patients", "payment_reconciliation",
     "finance",
+    "telemedicine",
 ]
 
 # The Finance module: every financial and HMO/company feature.
@@ -388,6 +389,10 @@ def admin_required_response(action_text="perform this action"):
         status=status.HTTP_403_FORBIDDEN,
     )
 
+
+# Online bookings for today's clinic close this many minutes before it starts
+# (BookingSerializer enforces the same rule).
+SAME_DAY_CUTOFF_MINUTES = 10
 
 class AdminOrReadOnly(BasePermission):
     """Anyone may read; only administrators may create, edit or delete."""
@@ -715,6 +720,9 @@ def public_booking_payload(booking):
     acronym = (doctor.acronym or "").strip() if doctor else ""
     data["doctorAcronym"] = acronym
     data["doctor_acronym"] = acronym
+    if getattr(booking, "is_online", False) and booking.video_token:
+        # The patient's own join link for the video consultation.
+        data["joinPath"] = f"/consult/{booking.video_token}"
     return data
 
 
@@ -953,6 +961,15 @@ class DoctorViewSet(viewsets.ModelViewSet):
                 timezone.localtime(payments.hmo_window(slot_start)[0]).isoformat() if slot_start else None
             )
             availability_details[-1]["starts_at"] = slot_start.isoformat() if slot_start else None
+            # Bookable online right now: open, not full, and (for today) at least
+            # SAME_DAY_CUTOFF_MINUTES before the clinic starts (the rule the
+            # booking itself enforces).
+            cutoff_passed = bool(
+                availability_details[-1]["available"] and day == today and slot_start
+                and (slot_start - timezone.now()).total_seconds() / 60.0 < SAME_DAY_CUTOFF_MINUTES
+            )
+            availability_details[-1]["cutoff_passed"] = cutoff_passed
+            availability_details[-1]["bookable"] = bool(availability_details[-1]["available"] and not cutoff_passed)
 
         return Response({
             "doctor_id": doctor.doc_id,
@@ -967,6 +984,8 @@ class DoctorViewSet(viewsets.ModelViewSet):
             "hmo_min_notice_hours": payments.hmo_notice_hours(),
             "hmo_close_minutes": payments.HMO_CLOSE_MINUTES,
             "earliest_hmo_date": next((d["date"] for d in availability_details if d["hmo_available"]), None),
+            # The exact next clinic day a private patient can book online.
+            "next_bookable_date": next((d["date"] for d in availability_details if d["bookable"]), None),
             "consultation_fee": float(payments.clinic_fee(doctor)),
             # First visit = consultation_fee; follow-up = follow_up_fee (same as first visit when not set).
             "first_visit_fee": float(payments.first_visit_fee(doctor)),
@@ -1860,23 +1879,39 @@ class BookingViewSet(viewsets.ModelViewSet):
     def follow_up_check(self, request):
         """
         Can this patient book a follow-up in this doctor's clinic?
-        ?doctor_id=&patient_name=&patient_phone=&hospital_card_number=&date=
-        Returns {"locked": bool, "window_days": 30}. Only says whether a
+        ?doctor_id=&patient_name=&patient_phone=&hospital_card_number=&payment_type=
+        Returns {"visit_type", "locked", "first_visit_locked", "message"}. Only says whether a
         follow-up is allowed, never when or where the patient was seen.
         """
-        from .duplicates import FOLLOW_UP_WINDOW_DAYS, follow_up_locked
+        from .duplicates import FOLLOW_UP_WINDOW_DAYS, auto_visit_type, follow_ups_per_first_visit
 
         q = request.query_params
         doctor = _find_doctor(q.get("doctor_id"))
         if doctor is None:
             return Response({"locked": False, "window_days": FOLLOW_UP_WINDOW_DAYS})
-        locked, _ = follow_up_locked(doctor, q.get("patient_name", ""), q.get("patient_phone", ""),
-                                     q.get("hospital_card_number", ""), appointment_date=parse_date(q.get("date")) if q.get("date") else None)
+        ident = (q.get("patient_name", ""), q.get("patient_phone", ""), q.get("hospital_card_number", ""))
+        pay_type = q.get("payment_type") or "Private Self-Pay"
+        # The visit type is decided by the order of the patient's booking records in
+        # this clinic (private: First, Follow-up...; HMO/Company: First, Follow-up,
+        # Follow-up...). The booking form shows it and can't change it; the server
+        # applies the same rule when the booking is made.
+        visit, _start, _until = auto_visit_type(doctor, *ident, payment_type=pay_type)
+        sponsored = follow_ups_per_first_visit(pay_type) == 2
+        order = "First visit, Follow-up, Follow-up" if sponsored else "First visit, Follow-up"
+        if visit == "Follow-up":
+            message = (f"This booking is a follow-up visit: in each clinic your bookings go {order}, "
+                       "then First visit again.")
+        else:
+            message = (f"This booking is a first visit: in each clinic your bookings go {order}, "
+                       "then First visit again.")
         return Response({
-            "locked": bool(locked),
+            "visit_type": visit,
+            # Kept for older pages: True = Follow-up not allowed.
+            "locked": visit != "Follow-up",
+            # True = First Visit not allowed (this is a follow-up).
+            "first_visit_locked": visit == "Follow-up",
             "window_days": FOLLOW_UP_WINDOW_DAYS,
-            "message": (f"Your last appointment in this clinic was more than {FOLLOW_UP_WINDOW_DAYS} days ago, "
-                        "so this booking is a first visit.") if locked else "",
+            "message": message,
         })
 
     @action(detail=False, methods=["get"], url_path="public-lookup", permission_classes=[AllowAny])
@@ -2063,6 +2098,9 @@ class BookingViewSet(viewsets.ModelViewSet):
             return staff_required_response("check patients in")
 
         booking = self.get_object()
+        if getattr(booking, "is_online", False):
+            return Response({"error": f"Ticket {booking.ref_code} is an online video consultation: there is nothing to check in."},
+                            status=status.HTTP_400_BAD_REQUEST)
         today = timezone.localdate().isoformat()
         if str(booking.date or "")[:10] != today:
             return Response(
@@ -2766,7 +2804,10 @@ class ScheduleExceptionViewSet(viewsets.ViewSet):
     """
     GET    /api/schedule-exceptions/?doctor=doc-1&upcoming=true
     GET    /api/schedule-exceptions/preview/?doctor_id=doc-1&date=2026-11-07
-    POST   /api/schedule-exceptions/        {doctor_id, original_date, action, new_date?, shift_time?, reason}
+    GET    /api/schedule-exceptions/preview/?doctor_id=doc-1&date=2026-11-07&target_date=2026-11-14  (merge)
+    POST   /api/schedule-exceptions/        {doctor_id, original_date, action, new_date?, shift_time?, reason,
+                                             allow_over_capacity? (merge)}
+           action: cancel | reschedule (to a date with no clinic) | merge (to another clinic date)
     GET    /api/schedule-exceptions/<id>/   (poll notification progress)
     POST   /api/schedule-exceptions/<id>/retry-notifications/
     DELETE /api/schedule-exceptions/<id>/   (undo; only if no bookings were affected)
@@ -2802,7 +2843,10 @@ class ScheduleExceptionViewSet(viewsets.ViewSet):
         if not doctor:
             return Response({"error": "Doctor not found."}, status=status.HTTP_404_NOT_FOUND)
         try:
-            return Response(preview_schedule_change(doctor, request.query_params.get("date")))
+            return Response(preview_schedule_change(
+                doctor, request.query_params.get("date"),
+                target_date=request.query_params.get("target_date") or None,
+            ))
         except ScheduleChangeError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2819,6 +2863,8 @@ class ScheduleExceptionViewSet(viewsets.ViewSet):
                 shift_times=shift,
                 reason=data.get("reason"),
                 created_by=(user.get_full_name() or user.first_name or user.username) if user and user.is_authenticated else "",
+                allow_over_capacity=str(data.get("allow_over_capacity") or data.get("allowOverCapacity") or "").lower()
+                in ("1", "true", "yes", "on"),
             )
         except ScheduleChangeError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2827,7 +2873,9 @@ class ScheduleExceptionViewSet(viewsets.ViewSet):
             action_name="SCHEDULE_CHANGED",
             message=(
                 f"Clinic on {exception.original_date} "
-                + ("cancelled." if exception.action == "cancel" else f"moved to {exception.new_date}.")
+                + ("cancelled." if exception.action == "cancel"
+                   else f"patients moved to the clinic on {exception.new_date}." if exception.action == "merge"
+                   else f"moved to {exception.new_date}.")
             ),
         )
         return Response(

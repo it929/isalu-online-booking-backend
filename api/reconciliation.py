@@ -165,7 +165,15 @@ def _booking_payload(b):
         "booker_email": getattr(b, "booker_email", "") or "",
         "note": b.delete_reason or "",
         "created_at": _iso(getattr(b, "created_at", None)),
+        "consultation_mode": getattr(b, "consultation_mode", "") or "in_person",
+        # Patient-facing documents (the printed receipt) use the doctor's public acronym.
+        "doctor_acronym": _doctor_acronym(b.doctor_id),
     }
+
+
+def _doctor_acronym(doctor_id):
+    d = Doctor.objects.filter(doc_id__iexact=str(doctor_id or "").strip()).only("acronym", "name").first()
+    return ((d.acronym or d.name) or "").strip() if d else ""
 
 
 def event_payload(e):

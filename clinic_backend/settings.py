@@ -326,3 +326,13 @@ SUPERUSER_TOOLS_PATH = os.getenv("SUPERUSER_TOOLS_PATH", "").strip()
 SUPERUSER_TOOLS_DIR = os.getenv("SUPERUSER_TOOLS_DIR", str(BASE_DIR / "superuser_tools_data"))
 # Extra addresses (comma separated) for the tools page alert emails; superusers with an email always get them.
 SUPERUSER_TOOLS_ALERT_EMAIL = os.getenv("SUPERUSER_TOOLS_ALERT_EMAIL", "").strip()
+
+# Online (video) consultations. See api/telemedicine.py.
+# JSON list of WebRTC ICE servers; add a TURN server for patients on mobile
+# data / strict networks. Empty = Google's public STUN.
+TELEMEDICINE_ICE_SERVERS = os.getenv("TELEMEDICINE_ICE_SERVERS", "").strip()
+TELEMEDICINE_JOIN_EARLY_MINUTES = int(os.getenv("TELEMEDICINE_JOIN_EARLY_MINUTES", "15") or 15)
+TELEMEDICINE_TURN_URLS = os.getenv("TELEMEDICINE_TURN_URLS", "")
+TELEMEDICINE_TURN_SECRET = os.getenv("TELEMEDICINE_TURN_SECRET", "")
+TELEMEDICINE_TURN_TTL_SECONDS = int(os.getenv("TELEMEDICINE_TURN_TTL_SECONDS", "21600") or 21600)
+
