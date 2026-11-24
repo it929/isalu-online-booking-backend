@@ -564,6 +564,9 @@ class BookingSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = [
             "ref_code", "created_at", "hmo_decline_reason", "hmo_declined_at", "hmo_declined_by",
+            "hmo_reversed_at", "hmo_reversed_by", "hmo_reversal_reason", "hmo_reversed_auth_code",
+            # Walk-in registrations are only made through the Helpdesk walk-in module.
+            "is_walk_in", "walk_in_registered_by",
             # Online payment details are only ever set by the server.
             "fee_amount", "payment_reference", "payment_expires_at", "amount_paid", "paid_at",
             "first_visit_fee",
@@ -711,6 +714,12 @@ class BookingSerializer(serializers.ModelSerializer):
         ret["hmoDeclineReason"] = instance.hmo_decline_reason
         ret["hmoDeclinedAt"] = instance.hmo_declined_at.isoformat() if instance.hmo_declined_at else None
         ret["hmoDeclinedBy"] = instance.hmo_declined_by
+        ret["hmoReversedAt"] = instance.hmo_reversed_at.isoformat() if instance.hmo_reversed_at else None
+        ret["hmoReversedBy"] = instance.hmo_reversed_by
+        ret["hmoReversalReason"] = instance.hmo_reversal_reason
+        ret["hmoReversedAuthCode"] = instance.hmo_reversed_auth_code
+        ret["isWalkIn"] = bool(getattr(instance, "is_walk_in", False))
+        ret["walkInRegisteredBy"] = getattr(instance, "walk_in_registered_by", "") or ""
         ret["createdAt"] = instance.created_at.isoformat() if instance.created_at else None
         ret["feeAmount"] = float(instance.fee_amount) if instance.fee_amount is not None else None
         ret["amountPaid"] = float(instance.amount_paid) if instance.amount_paid is not None else None
@@ -1188,6 +1197,9 @@ class BookingSerializer(serializers.ModelSerializer):
         )
 
         # ---- capacity ------------------------------------------------
+        # A walk-in registration never takes a slot, so moving one isn't limited by capacity.
+        if inst is not None and getattr(inst, "is_walk_in", False):
+            return data
         max_capacity = resolved["capacity"]
         existing = count_doctor_bookings(
             doc_obj.doc_id, appt_date, exclude_ref=inst.ref_code if inst else None

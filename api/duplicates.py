@@ -24,7 +24,7 @@ _TITLES = {
     "alhaja", "pastor", "rev", "engr", "barr", "hon", "sir", "madam",
 }
 # Statuses after which a patient may book the same clinic again.
-_FINISHED = ("completed", "checked in")
+_FINISHED = ("completed", "checked in", "absent")
 
 
 def normalize_name(name):

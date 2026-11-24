@@ -67,6 +67,9 @@ class Role(models.Model):
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, primary_key=True, related_name='profile')
     role = models.ForeignKey(Role, on_delete=models.SET_NULL, null=True, blank=True, related_name='user_profiles')
+    # Module Access (admin): per-user changes on top of the role's modules.
+    extra_desks = models.JSONField(default=list, blank=True)     # modules granted to this user only
+    removed_desks = models.JSONField(default=list, blank=True)   # role modules taken away from this user
 
     class Meta:
         ordering = ['user__first_name', 'user__username']
@@ -74,6 +77,22 @@ class UserProfile(models.Model):
     def __str__(self):
         return f"{self.user.username} - {self.role.name if self.role else 'No Role'}"
 
+
+
+class ModuleAccessChange(models.Model):
+    """Audit trail for the admin Module Access feature."""
+    TARGET_ROLE = "role"
+    TARGET_USER = "user"
+    target_type = models.CharField(max_length=10)
+    target_id = models.CharField(max_length=100)
+    target_name = models.CharField(max_length=200, blank=True, default="")
+    before = models.JSONField(default=dict, blank=True)
+    after = models.JSONField(default=dict, blank=True)
+    actor = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
 
 class CustomTimeSlot(models.Model):
@@ -602,6 +621,21 @@ class Booking(models.Model):
         blank=True,
         default="",
     )
+
+    # HMO desk reversed an approval that was granted (by mistake, or the HMO
+    # withdrew it). The booking goes back to the approval queue; the last
+    # reversal is kept here for the record.
+    hmo_reversed_at = models.DateTimeField(null=True, blank=True)
+    hmo_reversed_by = models.CharField(max_length=200, blank=True, default="")
+    hmo_reversal_reason = models.TextField(blank=True, default="")
+    hmo_reversed_auth_code = models.CharField(max_length=200, blank=True, default="")
+
+    # Walk-in registration at the Helpdesk: a patient who came to the hospital.
+    # Walk-ins never take an online booking slot (they don't count toward the
+    # clinic's capacity); private ones pay at the Cashdesk, HMO/Company ones go
+    # to the HMO desk for approval.
+    is_walk_in = models.BooleanField(default=False, db_index=True)
+    walk_in_registered_by = models.CharField(max_length=200, blank=True, default="")
 
     # ---- Online payment (Paystack), private self-pay only -------------
     # A booking waiting for payment holds its slot until payment_expires_at.

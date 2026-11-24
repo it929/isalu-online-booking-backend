@@ -27,6 +27,7 @@ from django.utils import timezone
 from .models import Booking, Doctor, ScheduleException
 from .scheduling import (
     capacity_bookings_qs,
+    slot_bookings_qs,
     clear_exception_cache,
     parse_date,
     resolve_doctor_day,
@@ -35,7 +36,7 @@ from .scheduling import (
 logger = logging.getLogger(__name__)
 
 # Bookings that have already been seen are never cancelled or moved.
-FINISHED_STATUSES = ("checked in", "completed")
+FINISHED_STATUSES = ("checked in", "completed", "absent")
 
 
 class ScheduleChangeError(ValueError):
@@ -60,7 +61,7 @@ def merge_target_info(doctor, target, moving_count=0, original=None):
     """
     clear_exception_cache(doctor)
     state = resolve_doctor_day(doctor, target)
-    booked = capacity_bookings_qs().filter(doctor_id=doctor.doc_id, date=target.isoformat()).count()
+    booked = slot_bookings_qs().filter(doctor_id=doctor.doc_id, date=target.isoformat()).count()
     capacity = state["capacity"] if state["on_duty"] else 0
     shifts = list(state["config"].get("shiftTimes") or []) or ([state["shift"]] if state["shift"] else [])
     problem = ""

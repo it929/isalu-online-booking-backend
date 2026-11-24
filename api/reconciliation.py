@@ -168,7 +168,21 @@ def _booking_payload(b):
         "consultation_mode": getattr(b, "consultation_mode", "") or "in_person",
         # Patient-facing documents (the printed receipt) use the doctor's public acronym.
         "doctor_acronym": _doctor_acronym(b.doctor_id),
+        # For checking the patient in from the reconciliation result.
+        "is_active": bool(b.is_active),
+        "hmo_status": b.hmo_status or "",
+        "cleared": _is_cleared(b),
+        "arrived_at": _iso(getattr(b, "arrived_at", None)),
+        "arrived_by": getattr(b, "arrived_by", "") or "",
     }
+
+
+def _is_cleared(b):
+    from .views import is_cleared_booking   # local import: views imports this module
+    try:
+        return bool(is_cleared_booking(b))
+    except Exception:
+        return False
 
 
 def _doctor_acronym(doctor_id):

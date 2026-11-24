@@ -54,6 +54,7 @@ from .schedule_changes import (
 )
 from .scheduling import (
     capacity_bookings_qs,
+    slot_bookings_qs,
     count_doctor_bookings,
     parse_date,
     resolve_doctor_day,
@@ -246,15 +247,17 @@ ALL_DESKS = [
     "booking_payments", "companies", "cleared_patients", "payment_reconciliation",
     "finance",
     "telemedicine",
+    "hmo_reversal",
+    "walk_in",
 ]
 
 # The Finance module: every financial and HMO/company feature.
 FINANCE_DESKS = (
     "booking_payments", "payment_reconciliation", "cashdesk", "private_patients", "cleared_patients",
-    "hmo", "hmo_enrollees", "hmo_declined", "companies",
+    "hmo", "hmo_enrollees", "hmo_declined", "companies", "hmo_reversal",
 )
 # Finance can view these but not work them (unless the role also has them itself).
-FINANCE_VIEW_ONLY_DESKS = ("cashdesk", "hmo", "hmo_declined", "hmo_enrollees", "companies")
+FINANCE_VIEW_ONLY_DESKS = ("cashdesk", "hmo", "hmo_declined", "hmo_enrollees", "companies", "hmo_reversal")
 FINANCE_ROLE_KEYWORDS = ("finance", "accountant", "accounts officer", "account officer", "auditor")
 
 # Staff working any private (self-pay) module can check online payments.
@@ -290,6 +293,17 @@ def is_admin_user(user):
     return bool(role and role.status and any(k in name for k in ADMIN_ROLE_KEYWORDS))
 
 
+def user_desk_overrides(user):
+    """(extra_desks, removed_desks) set for this user in Module Access."""
+    try:
+        profile = user.profile
+    except Exception:
+        return [], []
+    extra = [d for d in (getattr(profile, "extra_desks", None) or []) if d in ALL_DESKS]
+    removed = [d for d in (getattr(profile, "removed_desks", None) or []) if d in ALL_DESKS]
+    return extra, removed
+
+
 def build_staff_profile(user):
     """Profile returned at login and by /auth/me/ (drives the dashboard sidebar)."""
     role = get_user_role(user)
@@ -307,6 +321,13 @@ def build_staff_profile(user):
         desk = "analytics" if user.is_superuser else "helpdesk"
         allowed = [] if user.is_superuser else ["helpdesk", "all_patients", "checked_in_patients"]
     read_only = []
+    # Module Access: per-user changes made by an administrator.
+    extra, removed = user_desk_overrides(user)
+    if not admin and (role is None or role.status):
+        for d in extra:
+            if d not in allowed:
+                allowed.append(d)
+        allowed = [d for d in allowed if d not in removed]
     if admin:
         allowed = list(ALL_DESKS)
     else:
@@ -322,9 +343,20 @@ def build_staff_profile(user):
         if "hmo" in allowed and "hmo_declined" not in allowed:
             # Whoever works the HMO desk also handles the requests it declined.
             allowed.append("hmo_declined")
+        if "hmo" in allowed and "hmo_reversal" not in allowed:
+            # ...and can reverse an approval it granted.
+            allowed.append("hmo_reversal")
+            if "hmo" in read_only and "hmo_reversal" not in read_only:
+                read_only.append("hmo_reversal")
         if "payment_reconciliation" not in allowed and any(d in allowed for d in PRIVATE_PAYMENT_DESKS):
             # Helpdesk, Cashdesk and the other private-patient modules confirm online payments.
             allowed.append("payment_reconciliation")
+        if removed:
+            # A module an administrator took away stays away, even if another module would bring it in.
+            allowed = [d for d in allowed if d not in removed]
+            read_only = [d for d in read_only if d not in removed]
+        if desk not in allowed and allowed:
+            desk = allowed[0]
     return {
         "id": user.id,
         "username": user.username,
@@ -336,6 +368,8 @@ def build_staff_profile(user):
         "allowedDesks": allowed,
         # Modules this user may view but not act in (Finance sees the Cashdesk without its buttons).
         "readOnlyDesks": read_only,
+        # Modules an administrator took away from this user (Module Access); never shown to them.
+        "removedDesks": [] if admin else list(removed),
     }
 
 
@@ -522,7 +556,8 @@ def count_active_bookings(doctor, date_str=None, date_range=None):
     implementation also matched doctor_name__icontains, which counted other
     doctors' bookings when one name contained another.
     """
-    qs = capacity_bookings_qs().filter(doctor_id=doctor.doc_id)
+    # Slots only: walk-in registrations never take a booking slot.
+    qs = slot_bookings_qs().filter(doctor_id=doctor.doc_id)
     if date_str:
         return qs.filter(date=str(date_str)).count()
     if date_range:
@@ -1241,6 +1276,8 @@ def public_reschedule_problem(booking, data):
         or new_status not in PUBLIC_RESCHEDULE_STATUSES
     ):
         return staff_required_response("modify this booking")
+    if getattr(booking, "is_walk_in", False):
+        return Response({"error": "This is a walk-in registration made at the hospital. Please contact the Helpdesk to change it."}, status=status.HTTP_400_BAD_REQUEST)
     if str(booking.status).lower() == "awaiting payment":
         return Response(
             {"error": "This booking isn't paid yet. Finish paying first, or start a new booking."},
@@ -1258,7 +1295,9 @@ def public_reschedule_problem(booking, data):
     return None
 
 
-LIFECYCLE_STATUSES = {"Pending", "Confirmed", "Checked In", "Completed", "Cancelled"}
+LIFECYCLE_STATUSES = {"Pending", "Confirmed", "Checked In", "Completed", "Cancelled",
+                      # Monitor: a checked-in/cleared patient who didn't come forward when called.
+                      "Absent"}
 
 
 def payment_extras(bookings):
@@ -2239,6 +2278,70 @@ class BookingViewSet(viewsets.ModelViewSet):
             "data": BookingSerializer(booking).data,
         })
 
+    @action(detail=True, methods=["post"], url_path="reverse-hmo")
+    def reverse_hmo(self, request, ref_code=None):
+        """
+        Reverse a granted HMO/Company approval (granted by mistake, or the HMO
+        withdrew it). The booking goes back to the HMO approval queue as
+        Awaiting Approval and is no longer cleared: a checked-in patient leaves
+        the doctor's queue (their arrival is kept). Patients already with the
+        doctor or seen can't be reversed. A reason is required and recorded.
+        """
+        if not is_staff_request(request):
+            return staff_required_response("reverse HMO approvals")
+        # HMO desk staff (they get the Reverse HMO Approval module with it) or a role given that module.
+        if not user_has_desk(request.user, "hmo_reversal"):
+            return Response({"error": "Only the HMO desk can reverse an HMO approval."}, status=status.HTTP_403_FORBIDDEN)
+        if not (can_work_desk(request.user, "hmo_reversal") and can_work_desk(request.user, "hmo")):
+            return view_only_response("reverse HMO approvals")
+
+        booking = self.get_object()
+        if not is_sponsored_booking(booking):
+            return Response({"error": f"Ticket {booking.ref_code} is not an HMO or company booking."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if str(booking.hmo_status or "").strip().lower() != "approved":
+            return Response({"error": f"Ticket {booking.ref_code} has no granted approval to reverse "
+                                      f"(HMO status: {booking.hmo_status or 'Awaiting Approval'})."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not booking.is_active or str(booking.status or "").strip().lower() in NOT_SEEN_STATUSES:
+            return Response({"error": f"Ticket {booking.ref_code} is cancelled or not active."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        current = str(booking.status or "").strip().lower()
+        if current in ("consulting", "completed"):
+            return Response({"error": f"{booking.patient_name} has already been seen by the doctor "
+                                      f"(status: {booking.status}), so the approval can't be reversed."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        reason = " ".join(str(request.data.get("reason") or "").split())[:1000]
+        if len(reason) < 3:
+            return Response({"error": "Please give the reason for reversing this approval."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        actor = self._staff_name(request)
+        was_checked_in = current == "checked in"
+        booking.hmo_reversed_auth_code = booking.hmo_auth_code or ""
+        booking.hmo_reversed_at = timezone.now()
+        booking.hmo_reversed_by = str(actor)[:200]
+        booking.hmo_reversal_reason = reason
+        booking.hmo_status = "Awaiting Approval"
+        booking.hmo_auth_code = ""
+        booking.payment_status = "Pending"
+        fields = ["hmo_reversed_auth_code", "hmo_reversed_at", "hmo_reversed_by", "hmo_reversal_reason",
+                  "hmo_status", "hmo_auth_code", "payment_status"]
+        if was_checked_in:
+            booking.status = "Confirmed"      # out of the doctor's queue until approved again
+            fields.append("status")
+        booking.save(update_fields=fields)
+        broadcast_booking_update(
+            booking, event_type="HMO_REVERSED",
+            message=f"HMO approval reversed for ticket {booking.ref_code}: back in the approval queue.",
+        )
+        return Response({
+            "message": (f"Approval reversed for {booking.patient_name} ({booking.ref_code}). "
+                        "The booking is back in the HMO approval queue"
+                        + (" and the patient has left the doctor's queue." if was_checked_in else ".")),
+            "data": BookingSerializer(booking).data,
+        })
+
     @action(detail=True, methods=["post"], url_path="reopen-hmo")
     def reopen_hmo(self, request, ref_code=None):
         """Send a declined booking back to the HMO approval queue."""
@@ -2930,7 +3033,7 @@ class ClinicAnalyticsViewSet(viewsets.ViewSet):
         today_str = today.isoformat()
 
         today_bookings = list(
-            capacity_bookings_qs()
+            slot_bookings_qs()
             .filter(date=today_str)
             .values("doctor_id", "doctor_specialty")
         )

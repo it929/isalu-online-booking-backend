@@ -36,6 +36,8 @@ router.register(r'settings', AppSettingViewSet, basename='setting')
 router.register(r'clinic-analytics', ClinicAnalyticsViewSet, basename='clinic-analytics')
 router.register(r'schedule-exceptions', ScheduleExceptionViewSet, basename='schedule-exception')
 
+from .module_access import ModuleAccessRoleView, ModuleAccessUserView, ModuleAccessView
+from .walk_in import WalkInClinicDaysView, WalkInRegisterView, WalkInVisitTypeView
 from .telemedicine_views import (
     OnlineSessionActionView,
     OnlineSessionDetailView,
@@ -70,6 +72,14 @@ urlpatterns = [
     path('online-sessions/<str:session_id>/', OnlineSessionDetailView.as_view(), name='online-session'),
     path('online-sessions/<str:session_id>/<str:action>/', OnlineSessionActionView.as_view(), name='online-session-action'),
     path('telemedicine/slots/', PublicOnlineSlotsView.as_view(), name='telemedicine-slots'),
+    # Module Access (administrators only)
+    path('module-access/', ModuleAccessView.as_view(), name='module-access'),
+    path('module-access/roles/<str:role_id>/', ModuleAccessRoleView.as_view(), name='module-access-role'),
+    path('module-access/users/<int:user_id>/', ModuleAccessUserView.as_view(), name='module-access-user'),
+    # Helpdesk walk-in registration
+    path('walk-in/', WalkInRegisterView.as_view(), name='walk-in-register'),
+    path('walk-in/clinic-days/', WalkInClinicDaysView.as_view(), name='walk-in-days'),
+    path('walk-in/visit-type/', WalkInVisitTypeView.as_view(), name='walk-in-visit-type'),
     path('telemedicine/join/<str:token>/', PatientJoinView.as_view(), name='telemedicine-join'),
     path('', include(router.urls)),
 ]

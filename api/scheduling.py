@@ -634,11 +634,19 @@ def capacity_bookings_qs(queryset=None):
     return active_bookings_qs(queryset).exclude(consultation_mode="online")
 
 
+def slot_bookings_qs(queryset=None):
+    """Bookings that take one of the clinic's booking slots: in-person bookings
+    except Helpdesk walk-in registrations, which never use or show on the slots.
+    (Walk-ins still count everywhere else: reports, the visit-type order,
+    duplicate warnings, and moving or cancelling a clinic day.)"""
+    return capacity_bookings_qs(queryset).exclude(is_walk_in=True)
+
+
 def count_doctor_bookings(doctor_id, date_val, exclude_ref=None):
     date_val = parse_date(date_val)
     if not doctor_id or date_val is None:
         return 0
-    qs = capacity_bookings_qs().filter(
+    qs = slot_bookings_qs().filter(
         doctor_id=str(doctor_id), date=date_val.isoformat()
     )
     if exclude_ref:

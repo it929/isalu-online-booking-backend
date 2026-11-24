@@ -91,6 +91,9 @@ def start(request, booking, payload):
     """
     from .serializers import BookingSerializer
 
+    if getattr(booking, "is_walk_in", False):
+        raise RescheduleError("This is a walk-in registration made at the hospital. Please contact the Helpdesk to change it.")
+
     # Same checks a free reschedule runs (duty day, capacity, double booking, windows).
     serializer = BookingSerializer(booking, data=payload, partial=True, context={"request": request})
     serializer.is_valid(raise_exception=True)
