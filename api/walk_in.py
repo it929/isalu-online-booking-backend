@@ -9,8 +9,8 @@ doctor's clinic day:
 - No other booking rule applies: no slot/capacity limit, no same-day cutoff,
   no HMO 48-hour window, no online-payment requirement, no double-booking
   block, no accepted-patient-type limit. The only rule is the visit-type
-  order (duplicates.auto_visit_type): private First visit, Follow-up...;
-  HMO/Company First visit, Follow-up, Follow-up...
+  order (duplicates.auto_visit_type): First visit, Follow-up, Follow-up...
+  for private, HMO and Company patients alike.
 - A walk-in never takes or shows on an online booking slot
   (scheduling.slot_bookings_qs leaves walk-ins out).
 - Private Self-Pay: unpaid, so it goes to the Cashdesk to pay.

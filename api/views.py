@@ -1931,8 +1931,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         ident = (q.get("patient_name", ""), q.get("patient_phone", ""), q.get("hospital_card_number", ""))
         pay_type = q.get("payment_type") or "Private Self-Pay"
         # The visit type is decided by the order of the patient's booking records in
-        # this clinic (private: First, Follow-up...; HMO/Company: First, Follow-up,
-        # Follow-up...). The booking form shows it and can't change it; the server
+        # this clinic (every patient type: First, Follow-up, Follow-up, First...). The booking form shows it and can't change it; the server
         # applies the same rule when the booking is made.
         visit, _start, _until = auto_visit_type(doctor, *ident, payment_type=pay_type)
         sponsored = follow_ups_per_first_visit(pay_type) == 2

@@ -324,11 +324,11 @@ def legacy_30_day_visit_type(doctor, patient_name="", patient_phone="", card_num
 # Automatic visit type: by the order of the patient's booking records, per
 # clinic (department).
 #
-#   Private Self-Pay: First Visit, Follow-up, First Visit, Follow-up, ...
-#   HMO / Company:    First Visit, Follow-up, Follow-up, First Visit, ...
+#   All patients (Private Self-Pay, HMO, Company):
+#                     First Visit, Follow-up, Follow-up, First Visit, ...
 #
 # The patient's first record in a clinic is a First Visit. After a First
-# Visit come the allowed follow-ups (1 private, 2 HMO/Company), then the next
+# Visit come the allowed follow-ups (2, for every patient type), then the next
 # record is a First Visit again. It reads the visit type each earlier record
 # was booked as, so existing bookings are never relabelled, and there is no
 # time limit. Cancelled, unpaid-hold and expired bookings don't count.
@@ -380,9 +380,10 @@ def patient_clinic_records(doctor, patient_name="", patient_phone="", card_numbe
 
 
 def follow_ups_per_first_visit(payment_type):
-    """1 for Private Self-Pay; 2 for HMO and Company (sponsored) patients."""
-    from .payments import is_sponsored
-    return 2 if is_sponsored(payment_type or "") else 1
+    """2 for every patient type. Private Self-Pay now follows the HMO/Company
+    pattern (First Visit, Follow-up, Follow-up); it used to be 1 for private.
+    `payment_type` is kept so callers don't change."""
+    return 2
 
 
 def auto_visit_type(doctor, patient_name="", patient_phone="", card_number="", appointment_date=None,

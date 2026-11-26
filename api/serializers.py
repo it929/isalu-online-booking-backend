@@ -819,8 +819,7 @@ class BookingSerializer(serializers.ModelSerializer):
         visit = payments.normalize_visit_type(data.get("visit_type", inst.visit_type if inst else ""))
         # The visit type is decided by the patient's records, not chosen. In each
         # clinic (department) it follows the order of their booking records:
-        # private First, Follow-up, First, Follow-up...; HMO/Company First,
-        # Follow-up, Follow-up, First... (duplicates.auto_visit_type). Applied to
+        # First, Follow-up, Follow-up, First... for every patient type (duplicates.auto_visit_type). Applied to
         # every new booking and every change of visit type, from any source.
         if inst is None or "visit_type" in data:
             asked = visit if str(data.get("visit_type") or "").strip() else None
@@ -974,6 +973,26 @@ class BookingSerializer(serializers.ModelSerializer):
             data["hmo_name"] = company.name
         data["hmo_policy_code"] = ""
 
+    def _validate_hmo_name(self, data):
+        """
+        HMO patients booking online must name their HMO provider (the booking
+        form no longer fills one in for them). Only new bookings from the
+        public form are checked; staff entries and edits are unchanged.
+        """
+        if self.instance is not None:
+            return
+        pay = str(data.get("payment_type") or "")
+        if "hmo" not in pay.lower() or is_company_type(pay):
+            return
+        request = self.context.get("request")
+        from .views import is_staff_request  # local import: views imports this module
+        if request is None or is_staff_request(request):
+            return
+        name = " ".join(str(data.get("hmo_name") or "").split())
+        if not name or name.lower() in ("n/a", "na", "none", "hmo"):
+            raise self._error("Please enter your HMO provider.", field="hmo_name", hmo_name_required=True)
+        data["hmo_name"] = name[:200]
+
     def _requested_mode(self):
         inst = self.instance
         raw = ""
@@ -1060,6 +1079,7 @@ class BookingSerializer(serializers.ModelSerializer):
         data = super().validate(data)
         inst = self.instance
         self._validate_company(data)
+        self._validate_hmo_name(data)
         self._validate_phone(data)
         self._validate_card_and_booker(data)
         self._validate_visit_type(data)
